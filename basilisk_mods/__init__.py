@@ -18,6 +18,12 @@ from .lunar_terrain import (
     touchdown_check,
     export_to_obj,
 )
+from .rover import (
+    RoverConfig,
+    RoverState,
+    LunarRover,
+    export_rover_vizard_mesh,
+)
 
 __all__ = [
     "R_MOON_M",
@@ -34,4 +40,8 @@ __all__ = [
     "check_touchdown",
     "touchdown_check",
     "export_to_obj",
+    "RoverConfig",
+    "RoverState",
+    "LunarRover",
+    "export_rover_vizard_mesh",
 ]

@@ -103,3 +103,31 @@ Wavefront OBJ mesh standard for Basilisk Vizard 3D visualization:
 - **Vertical Exaggeration**: Default $1.0\times$ (true scale), clearly labelled in OBJ header comments.
 - **Normals**: Vertex normals calculated from local terrain gradients for smooth lighting in Vizard.
 - **Texture Coordinates**: Normalized UV coordinates in $[0.0, 1.0]$.
+- **Rover 3D Model**: `vizard/rover_body.obj` (0.9m x 0.75m x 0.8m chassis, mast, and solar array).
+
+---
+
+## 5. Rover Mobility & Telemetry Formats (Spec §4.3)
+
+### 5.1 Flight Telemetry Log (`runs/basilisk/rover_<id>.csv`)
+Recorded minute-by-minute during rover surface traverse:
+
+| Column | Type | Units | Description |
+|---|---|---|---|
+| `time_s` | `float` | **seconds (s)** | Mission elapsed time since rover egress. |
+| `x_m` | `float` | **metres (m)** | Polar-stereographic Easting. |
+| `y_m` | `float` | **metres (m)** | Polar-stereographic Northing. |
+| `z_m` | `float` | **metres (m)** | Ground elevation above lunar reference sphere. |
+| `battery_wh` | `float` | **Watt-hours (Wh)** | Stored electrical energy in vehicle battery. |
+| `battery_pct` | `float` | **percent (%)** | State of Charge relative to nominal capacity (120 Wh). |
+| `sun_fraction` | `float` | **ratio [0.0, 1.0]** | Surface solar illumination fraction (0 = full shadow, 1 = direct sunlight). |
+| `link_los` | `int` | **binary {0, 1}** | Line-of-sight RF link status to lander antenna (1 = link established, 0 = occluded). |
+| `speed_mps` | `float` | **m/s** | Kinematic drive speed (strictly 0.01 m/s when driving, 0 m/s when stopped). |
+| `slope_deg` | `float` | **degrees (deg)** | Surface slope angle (vehicle halts if slope > 15.0°). |
+| `distance_to_lander_m` | `float` | **metres (m)** | Line-of-sight range back to lander base station. |
+| `waypoint_idx` | `int` | scalar | Index of active target waypoint. |
+| `status` | `string` | text | Operational status code. |
+
+### 5.2 Vizard Motion Replay (`runs/basilisk/rover_<id>_vizard.csv`)
+- Recommended playback acceleration: **$120\times$ to $600\times$** ($1\text{ s}$ replay video represents $2$ to $10$ minutes of traverse). Do not artificially increase the vehicle physics speed.
+
