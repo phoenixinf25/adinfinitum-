@@ -1,0 +1,572 @@
+"""
+Lander Power, Thermal, and Direct-to-Earth Communications Module.
+
+Context: Spec §4.2 (Lander Power and Comms Subsystems), Spec §5 Phases 7-11 (Surface Operations).
+Simulates solar power generation from horizon-blocked lunar illumination datasets,
+tracks avionics, thermal heater, radio transmitter, and rover charging loads,
+evaluates battery state-of-charge through the lunar day and night (night survival check),
+models internal thermal response (simplified thermal model), and computes real-time
+mission control countdowns (time to sunset/sunrise, time to Earthset/Earthrise).
+
+Strict adherence to AGENTS.md:
+- Trailing inline unit comments on all physical numeric literals.
+- Full reStructuredText documentation in docstrings.
+- SI units (metres, seconds, Watts, Watt-hours, degrees).
+"""
+
+from __future__ import annotations
+import csv
+import json
+import math
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Union
+import numpy as np
+
+from worldmodel.ephem import (
+    LunarEphemeris,
+    SOLAR_CONSTANT_W_M2,
+    R_MOON_M,
+    calculate_sun_fraction
+)
+
+
+@dataclass
+class LanderPowerConfig:
+    """
+    Configuration parameters for lander power, thermal, and comms subsystems.
+    All physical literals carry trailing unit comments.
+    """
+    # Lander Identifier & Site
+    lander_id: str = "VIKRAM_LANDER"
+    site_name: str = "shackleton"
+    site_lat_deg: float = -89.7995  # [deg] Planetocentric latitude
+    site_lon_deg: float = 26.0496   # [deg] Planetocentric longitude
+
+    # Solar Array Parameters
+    panel_area_m2: float = 3.5           # [m^2] Total solar array surface area
+    solar_constant_w_m2: float = 1361.0  # [W/m^2] Solar irradiance at 1 AU
+    panel_factor: float = 0.28           # [-] Conversion factor (efficiency, angle of incidence, dust)
+
+    # Battery Storage Parameters (12 kWh class sized for lunar night survival)
+    battery_capacity_wh: float = 12000.0  # [W*h] Total nominal energy capacity
+    battery_initial_wh: float = 12000.0   # [W*h] Starting energy level upon touchdown
+    min_battery_wh: float = 0.0           # [W*h] Minimum cutoff threshold (0 Wh = depleted)
+    charge_efficiency: float = 0.95       # [-] Battery coulombic/energy charging efficiency
+    discharge_efficiency: float = 0.98    # [-] Battery discharging efficiency
+    low_battery_threshold_pct: float = 15.0  # [%] Threshold below which sleep conservation engages
+
+    # Electrical Power Loads
+    load_avionics_day_w: float = 40.0     # [W] Daytime continuous avionics & payload sensors
+    load_avionics_night_w: float = 12.0   # [W] Nighttime quiescent survival avionics
+    load_heater_day_w: float = 10.0       # [W] Daytime thermal control regulation
+    load_heater_night_w: float = 18.0     # [W] Nighttime survival heaters (higher at night)
+    load_radio_tx_w: float = 35.0         # [W] High-gain transmitter when Earth link is available
+    load_radio_standby_w: float = 4.0     # [W] Low-power receiver standby
+    load_rover_charging_w: float = 30.0   # [W] Power delivered to docked rover during daytime
+    load_sleep_survival_w: float = 6.0    # [W] Emergency deep-sleep survival load
+
+    # Simplified Thermal Model Parameters
+    thermal_capacitance_j_k: float = 48000.0  # [J/K] Thermal inertia of internal electronics bay
+    thermal_conductance_w_k: float = 0.42     # [W/K] Effective MLI conduction/radiation to environment
+    target_temp_c: float = 15.0               # [degC] Thermostat nominal setpoint
+    min_allowable_temp_c: float = -25.0       # [degC] Critical lower survival threshold
+    initial_temp_c: float = 18.0              # [degC] Touchdown initial internal temperature
+
+
+@dataclass
+class LanderPowerState:
+    """
+    Snapshot of the lander power, thermal, battery, and comms status at a given epoch.
+    """
+    time_s: float = 0.0              # [s] Simulation elapsed time
+    time_days: float = 0.0           # [day] Simulation elapsed days
+    timestamp_utc: str = ""          # ISO timestamp
+    sun_fraction: float = 0.0        # [-] Visible fraction of solar disc [0.0, 1.0]
+    sun_elevation_deg: float = 0.0   # [deg] Sun elevation above local horizontal
+    earth_visible: bool = False      # [-] Line-of-sight Direct-to-Earth contact available
+    earth_elevation_deg: float = 0.0 # [deg] Earth elevation above local horizontal
+    power_in_w: float = 0.0          # [W] Generated solar power
+    load_avionics_w: float = 0.0     # [W] Avionics power demand
+    load_heaters_w: float = 0.0      # [W] Survival heater power demand
+    load_radio_w: float = 0.0        # [W] Communications radio power demand
+    load_rover_w: float = 0.0        # [W] Rover charging power demand
+    total_load_w: float = 0.0        # [W] Sum of all electrical loads
+    net_power_w: float = 0.0         # [W] Net power balance (power_in - total_load)
+    battery_wh: float = 0.0          # [W*h] Stored battery energy
+    battery_pct: float = 0.0         # [%] State of charge
+    internal_temp_c: float = 0.0     # [degC] Internal equipment temperature
+    time_to_sunset_s: float = -1.0   # [s] Countdown to next sunset (-1 if in night)
+    time_to_sunrise_s: float = -1.0  # [s] Countdown to next sunrise (-1 if in day)
+    time_to_earthset_s: float = -1.0 # [s] Countdown to next Earth link loss (-1 if lost)
+    time_to_earthrise_s: float = -1.0# [s] Countdown to next Earth link restoration
+    is_surviving: bool = True        # [-] Night survival flag (battery > 0)
+    status: str = "NOMINAL"          # Status description
+
+
+class PowerCommsModule:
+    """
+    Basilisk simulation module for lander solar power generation, Direct-to-Earth
+    communications windows, battery state-of-charge integration, and thermal management.
+    """
+
+    def __init__(
+        self,
+        config: LanderPowerConfig | None = None,
+        light_dataset_path: str | Path | None = None,
+        ephem_model: LunarEphemeris | None = None,
+        horizon_mask_deg: np.ndarray | None = None
+    ):
+        """
+        Initialize the power and comms module.
+
+        Parameters:
+            config: Lander configuration object.
+            light_dataset_path: Path to data/light/<region>_<range>.npz file.
+            ephem_model: Optional LunarEphemeris instance if computing on-the-fly.
+            horizon_mask_deg: Optional 360-element horizon mask array [deg].
+        """
+        self.config = config or LanderPowerConfig()
+        self.battery_wh: float = self.config.battery_initial_wh  # [W*h]
+        self.internal_temp_c: float = self.config.initial_temp_c # [degC]
+        self.current_time_s: float = 0.0  # [s]
+
+        # Ephemeris / Light arrays
+        self.times_s: np.ndarray = np.array([], dtype=np.float64)
+        self.sun_fractions: np.ndarray = np.array([], dtype=np.float32)
+        self.sun_elevations: np.ndarray = np.array([], dtype=np.float32)
+        self.earth_visibles: np.ndarray = np.array([], dtype=bool)
+        self.earth_elevations: np.ndarray = np.array([], dtype=np.float32)
+        self.horizon_mask_deg = horizon_mask_deg
+
+        # Precomputed fast O(1) countdown arrays
+        self.countdowns_sunset: np.ndarray = np.array([], dtype=np.float32)
+        self.countdowns_sunrise: np.ndarray = np.array([], dtype=np.float32)
+        self.countdowns_earthset: np.ndarray = np.array([], dtype=np.float32)
+        self.countdowns_earthrise: np.ndarray = np.array([], dtype=np.float32)
+
+        self.ephem = ephem_model or LunarEphemeris()
+        self.step_idx: int = 0
+        self.has_precomputed_data: bool = False
+
+        if light_dataset_path is not None:
+            self.load_light_dataset(light_dataset_path)
+
+    def load_light_dataset(self, npz_path: str | Path) -> None:
+        """
+        Load precomputed illumination and Earth visibility data from a NumPy archive,
+        and precompute O(1) countdown lookahead tables in a single backward pass.
+
+        Parameters:
+            npz_path: Path to data/light/<region>_<range>.npz.
+        """
+        p = Path(npz_path)
+        if not p.exists():
+            raise FileNotFoundError(f"Light dataset not found: {p}")
+
+        data = np.load(p, allow_pickle=True)
+        self.times_s = data["time_s"]
+        self.sun_fractions = data["sun_fraction"]
+        self.sun_elevations = data["sun_elevation_deg"]
+        self.earth_visibles = data["earth_visible"]
+        self.earth_elevations = data["earth_elevation_deg"]
+        if "horizon_mask_deg" in data:
+            self.horizon_mask_deg = data["horizon_mask_deg"]
+        self.has_precomputed_data = True
+        self.step_idx = 0
+
+        # Vectorized precomputation of countdowns in O(N)
+        self._precompute_countdowns()
+        print(f"[PowerComms] Loaded light dataset from {p} ({len(self.times_s)} points)")
+
+    def _precompute_countdowns(self) -> None:
+        """Precompute countdown times to sunset, sunrise, Earthset, Earthrise in O(N)."""
+        n = len(self.times_s)
+        self.countdowns_sunset = np.full(n, -1.0, dtype=np.float32)
+        self.countdowns_sunrise = np.full(n, -1.0, dtype=np.float32)
+        self.countdowns_earthset = np.full(n, -1.0, dtype=np.float32)
+        self.countdowns_earthrise = np.full(n, -1.0, dtype=np.float32)
+
+        sun_lit = self.sun_fractions > 0.0
+        earth_lit = self.earth_visibles
+
+        next_sunset_t = -1.0
+        next_sunrise_t = -1.0
+        next_earthset_t = -1.0
+        next_earthrise_t = -1.0
+
+        for i in range(n - 2, -1, -1):
+            t_now = float(self.times_s[i])
+            t_next = float(self.times_s[i + 1])
+
+            # Transition detections at boundary i -> i+1
+            if sun_lit[i] and not sun_lit[i + 1]:
+                next_sunset_t = t_next
+            elif not sun_lit[i] and sun_lit[i + 1]:
+                next_sunrise_t = t_next
+
+            if earth_lit[i] and not earth_lit[i + 1]:
+                next_earthset_t = t_next
+            elif not earth_lit[i] and earth_lit[i + 1]:
+                next_earthrise_t = t_next
+
+            if sun_lit[i] and next_sunset_t >= 0.0:
+                self.countdowns_sunset[i] = next_sunset_t - t_now
+            elif not sun_lit[i] and next_sunrise_t >= 0.0:
+                self.countdowns_sunrise[i] = next_sunrise_t - t_now
+
+            if earth_lit[i] and next_earthset_t >= 0.0:
+                self.countdowns_earthset[i] = next_earthset_t - t_now
+            elif not earth_lit[i] and next_earthrise_t >= 0.0:
+                self.countdowns_earthrise[i] = next_earthrise_t - t_now
+
+    def calculate_power_in(self, sun_fraction: float) -> float:
+        """
+        Calculate instantaneous solar power entering the lander solar array.
+
+        Formula:
+            Power_in = panel_area * 1361.0 W/m^2 * sun_fraction * panel_factor
+
+        Parameters:
+            sun_fraction: Visible fraction of the solar disc [0.0, 1.0].
+
+        Returns:
+            power_in_w: Generated power in Watts [W].
+        """
+        if sun_fraction <= 0.0:
+            return 0.0  # [W] In total shadow / lunar night
+        # Physical solar array conversion
+        p_in = (
+            self.config.panel_area_m2 *
+            self.config.solar_constant_w_m2 *
+            float(sun_fraction) *
+            self.config.panel_factor
+        )
+        return float(p_in)  # [W]
+
+    def calculate_loads(
+        self,
+        is_day: bool,
+        earth_link: bool,
+        rover_charging: bool = False,
+        in_sleep_mode: bool = False
+    ) -> dict[str, float]:
+        """
+        Calculate instantaneous electrical consumption for each onboard subsystem.
+
+        Parameters:
+            is_day: True if sun is illuminating the lander (sun_fraction > 0).
+            earth_link: True if direct line-of-sight to Earth is established.
+            rover_charging: True if rover is actively drawing charge power.
+            in_sleep_mode: True if low-battery emergency deep-sleep is active.
+
+        Returns:
+            Dict containing individual and total loads in Watts [W].
+        """
+        if in_sleep_mode:
+            # Low-power emergency survival mode
+            return {
+                "avionics_w": 2.5,   # [W] Essential telemetry clock
+                "heaters_w": 3.0,   # [W] Minimum survival heat
+                "radio_w": 0.5,      # [W] Low rate beacon
+                "rover_w": 0.0,      # [W]
+                "total_w": self.config.load_sleep_survival_w  # [W]
+            }
+
+        # 1. Avionics load (daytime science/monitoring vs night quiescent)
+        if is_day:
+            p_avionics = self.config.load_avionics_day_w    # [W]
+        else:
+            p_avionics = self.config.load_avionics_night_w  # [W]
+
+        # 2. Heaters load (higher at night to prevent freezing in -180 degC cold)
+        if is_day:
+            p_heaters = self.config.load_heater_day_w       # [W]
+        else:
+            p_heaters = self.config.load_heater_night_w     # [W]
+
+        # 3. Radio load (active transmission when Earth link is up, standby during night/occlusion)
+        if earth_link and is_day:
+            p_radio = self.config.load_radio_tx_w           # [W]
+        else:
+            p_radio = self.config.load_radio_standby_w      # [W]
+
+        # 4. Rover charging (only during day when sun is available)
+        if rover_charging and is_day:
+            p_rover = self.config.load_rover_charging_w     # [W]
+        else:
+            p_rover = 0.0  # [W]
+
+        total = p_avionics + p_heaters + p_radio + p_rover  # [W]
+        return {
+            "avionics_w": p_avionics,
+            "heaters_w": p_heaters,
+            "radio_w": p_radio,
+            "rover_w": p_rover,
+            "total_w": total
+        }
+
+    def update_battery(self, net_power_w: float, dt_s: float) -> tuple[float, float]:
+        """
+        Integrate stored battery energy over time interval dt_s.
+
+        Parameters:
+            net_power_w: Net electrical power balance (power_in - total_load) [W].
+            dt_s: Time step in seconds [s].
+
+        Returns:
+            (battery_wh, battery_pct): New energy in [W*h] and State-of-Charge [%].
+        """
+        dt_hours = dt_s / 3600.0  # [hr]
+
+        if net_power_w >= 0.0:
+            # Charging: energy gained with charge efficiency
+            delta_e = net_power_w * dt_hours * self.config.charge_efficiency  # [W*h]
+            self.battery_wh = min(self.config.battery_capacity_wh, self.battery_wh + delta_e)
+        else:
+            # Discharging: energy drained with discharge efficiency
+            delta_e = (abs(net_power_w) * dt_hours) / self.config.discharge_efficiency  # [W*h]
+            self.battery_wh = max(self.config.min_battery_wh, self.battery_wh - delta_e)
+
+        battery_pct = (self.battery_wh / self.config.battery_capacity_wh) * 100.0  # [%]
+        return self.battery_wh, battery_pct
+
+    def update_thermal(self, is_day: bool, internal_dissipation_w: float, dt_s: float) -> float:
+        """
+        Simplified internal thermal model.
+        Balances internal dissipation against external radiative/conductive losses to space.
+
+        Parameters:
+            is_day: True if daytime, False if nighttime.
+            internal_dissipation_w: Total internal electrical dissipation [W].
+            dt_s: Time step in seconds [s].
+
+        Returns:
+            internal_temp_c: Updated internal equipment bay temperature [degC].
+        """
+        # Ambient sink temperature: ~ -15 degC day (under sunlit MLI), ~ -160 degC night
+        sink_temp_c = -15.0 if is_day else -160.0  # [degC]
+
+        # Heat loss through MLI blankets: Q_loss = G * (T_int - T_sink)
+        q_loss_w = self.config.thermal_conductance_w_k * (self.internal_temp_c - sink_temp_c)  # [W]
+        q_net_w = internal_dissipation_w - q_loss_w  # [W]
+
+        # dT = (Q_net * dt) / C_thermal
+        delta_t_c = (q_net_w * dt_s) / self.config.thermal_capacitance_j_k  # [degC]
+        self.internal_temp_c += delta_t_c
+
+        # Cap between -50 degC and +45 degC for physical bounds
+        self.internal_temp_c = float(np.clip(self.internal_temp_c, -50.0, 45.0))
+        return self.internal_temp_c
+
+    def step(self, dt_s: float = 60.0, rover_charging: bool = False) -> LanderPowerState:
+        """
+        Advance the simulation state by time step dt_s.
+
+        Parameters:
+            dt_s: Time step in seconds [s] (default: 60 s = 1 minute).
+            rover_charging: True if rover is docked and drawing power.
+
+        Returns:
+            LanderPowerState object containing the latest telemetry.
+        """
+        if self.has_precomputed_data and self.step_idx < len(self.times_s):
+            t_s = float(self.times_s[self.step_idx])
+            sun_frac = float(self.sun_fractions[self.step_idx])
+            sun_elev = float(self.sun_elevations[self.step_idx])
+            earth_vis = bool(self.earth_visibles[self.step_idx])
+            earth_elev = float(self.earth_elevations[self.step_idx])
+
+            # Fast O(1) table lookup
+            t_sunset = float(self.countdowns_sunset[self.step_idx])
+            t_sunrise = float(self.countdowns_sunrise[self.step_idx])
+            t_earthset = float(self.countdowns_earthset[self.step_idx])
+            t_earthrise = float(self.countdowns_earthrise[self.step_idx])
+
+            self.step_idx += 1
+        else:
+            # Query ephemeris directly
+            t_s = self.current_time_s
+            angles = self.ephem.get_topo_angles(
+                self.config.site_lat_deg,
+                self.config.site_lon_deg,
+                t_s
+            )
+            sun_elev = angles["sun_elevation_deg"]
+            earth_elev = angles["earth_elevation_deg"]
+            horiz_deg = 0.5
+            sun_frac = calculate_sun_fraction(sun_elev, horiz_deg)
+            earth_vis = bool(earth_elev > 0.0)
+            t_sunset, t_sunrise, t_earthset, t_earthrise = -1.0, -1.0, -1.0, -1.0
+            self.current_time_s += dt_s
+
+        self.current_time_s = t_s
+        is_day = bool(sun_frac > 0.0)
+
+        # 1. Solar power generation
+        power_in = self.calculate_power_in(sun_frac)  # [W]
+
+        # 2. Check if deep sleep mode should engage
+        pct = (self.battery_wh / self.config.battery_capacity_wh) * 100.0
+        in_sleep = bool(not is_day and pct <= self.config.low_battery_threshold_pct)
+
+        # 3. Subsystem electrical loads
+        loads = self.calculate_loads(
+            is_day=is_day,
+            earth_link=earth_vis,
+            rover_charging=rover_charging,
+            in_sleep_mode=in_sleep
+        )
+        total_load = loads["total_w"]  # [W]
+        net_power = power_in - total_load  # [W]
+
+        # 4. Integrate battery energy
+        bat_wh, bat_pct = self.update_battery(net_power, dt_s)
+
+        # 5. Internal thermal update
+        temp_c = self.update_thermal(is_day, total_load, dt_s)
+
+        # 6. Operational status determination
+        is_surviving = bool(bat_wh > 0.0)
+        if not is_surviving:
+            status = "POWER_DEPLETED_CRITICAL"
+        elif in_sleep:
+            status = "NIGHT_DEEP_SLEEP_SURVIVAL"
+        elif is_day and earth_vis:
+            status = "DAY_NOMINAL_DTE_ACTIVE"
+        elif is_day:
+            status = "DAY_NOMINAL_EARTH_BLOCKED"
+        elif earth_vis:
+            status = "NIGHT_SURVIVAL_DTE_ACTIVE"
+        else:
+            status = "NIGHT_SURVIVAL_STANDBY"
+
+        state = LanderPowerState(
+            time_s=t_s,
+            time_days=t_s / 86400.0,
+            timestamp_utc=f"T+ {t_s/86400.0:.2f}d",
+            sun_fraction=sun_frac,
+            sun_elevation_deg=sun_elev,
+            earth_visible=earth_vis,
+            earth_elevation_deg=earth_elev,
+            power_in_w=power_in,
+            load_avionics_w=loads["avionics_w"],
+            load_heaters_w=loads["heaters_w"],
+            load_radio_w=loads["radio_w"],
+            load_rover_w=loads["rover_w"],
+            total_load_w=total_load,
+            net_power_w=net_power,
+            battery_wh=bat_wh,
+            battery_pct=bat_pct,
+            internal_temp_c=temp_c,
+            time_to_sunset_s=t_sunset,
+            time_to_sunrise_s=t_sunrise,
+            time_to_earthset_s=t_earthset,
+            time_to_earthrise_s=t_earthrise,
+            is_surviving=is_surviving,
+            status=status
+        )
+        return state
+
+    def run_simulation(
+        self,
+        duration_days: float = 30.0,
+        dt_s: float = 60.0,
+        rover_charging_hours_per_day: float = 4.0
+    ) -> list[LanderPowerState]:
+        """
+        Execute a multi-day (e.g. 30-day) simulation run, collecting full telemetry history.
+
+        Parameters:
+            duration_days: Length of simulation in Earth days (default: 30 days).
+            dt_s: Time step in seconds [s].
+            rover_charging_hours_per_day: Daily hours devoted to charging the rover.
+
+        Returns:
+            history: List of LanderPowerState snapshots.
+        """
+        total_steps = int((duration_days * 86400.0) / dt_s)
+        history: list[LanderPowerState] = []
+
+        # Reset state to initial conditions
+        self.battery_wh = self.config.battery_initial_wh
+        self.internal_temp_c = self.config.initial_temp_c
+        self.step_idx = 0
+        self.current_time_s = 0.0
+
+        for i in range(total_steps):
+            t_s = i * dt_s
+            day_hour = (t_s % 86400.0) / 3600.0
+            # Rover charges during mid-day window (hours 10:00 to 14:00)
+            charge_rover = bool(10.0 <= day_hour <= 10.0 + rover_charging_hours_per_day)
+
+            state = self.step(dt_s=dt_s, rover_charging=charge_rover)
+            history.append(state)
+
+        return history
+
+    def export_telemetry_csv(
+        self,
+        history: list[LanderPowerState],
+        output_csv_path: str | Path = "runs/basilisk/lander_power_telemetry.csv",
+        log_interval_s: float = 300.0  # Log every 5 minutes by default
+    ) -> Path:
+        """
+        Export simulation telemetry history to a standardized CSV file.
+
+        Parameters:
+            history: List of LanderPowerState records.
+            output_csv_path: Target CSV file path.
+            log_interval_s: Decimation logging period in seconds (default: 300 s = 5 min).
+
+        Returns:
+            out_path: Absolute Path to the generated CSV file.
+        """
+        out_path = Path(output_csv_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        fieldnames = [
+            "time_s", "time_days", "sun_fraction", "sun_elevation_deg",
+            "earth_visible", "earth_elevation_deg", "power_in_w",
+            "load_total_w", "load_avionics_w", "load_heaters_w", "load_radio_w", "load_rover_w",
+            "net_power_w", "battery_wh", "battery_pct", "temperature_c",
+            "time_to_sunset_s", "time_to_sunrise_s", "time_to_earthset_s", "time_to_earthrise_s",
+            "status"
+        ]
+
+        last_logged_t = -log_interval_s
+        rows = 0
+
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for s in history:
+                if s.time_s - last_logged_t >= log_interval_s - 1e-4:
+                    writer.writerow({
+                        "time_s": f"{s.time_s:.1f}",
+                        "time_days": f"{s.time_days:.4f}",
+                        "sun_fraction": f"{s.sun_fraction:.4f}",
+                        "sun_elevation_deg": f"{s.sun_elevation_deg:.2f}",
+                        "earth_visible": 1 if s.earth_visible else 0,
+                        "earth_elevation_deg": f"{s.earth_elevation_deg:.2f}",
+                        "power_in_w": f"{s.power_in_w:.2f}",
+                        "load_total_w": f"{s.total_load_w:.2f}",
+                        "load_avionics_w": f"{s.load_avionics_w:.2f}",
+                        "load_heaters_w": f"{s.load_heaters_w:.2f}",
+                        "load_radio_w": f"{s.load_radio_w:.2f}",
+                        "load_rover_w": f"{s.load_rover_w:.2f}",
+                        "net_power_w": f"{s.net_power_w:.2f}",
+                        "battery_wh": f"{s.battery_wh:.2f}",
+                        "battery_pct": f"{s.battery_pct:.2f}",
+                        "temperature_c": f"{s.internal_temp_c:.2f}",
+                        "time_to_sunset_s": f"{s.time_to_sunset_s:.0f}",
+                        "time_to_sunrise_s": f"{s.time_to_sunrise_s:.0f}",
+                        "time_to_earthset_s": f"{s.time_to_earthset_s:.0f}",
+                        "time_to_earthrise_s": f"{s.time_to_earthrise_s:.0f}",
+                        "status": s.status
+                    })
+                    last_logged_t = s.time_s
+                    rows += 1
+
+        print(f"[PowerComms CSV] Exported {rows} records to {out_path.resolve()}")
+        return out_path

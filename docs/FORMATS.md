@@ -131,3 +131,50 @@ Recorded minute-by-minute during rover surface traverse:
 ### 5.2 Vizard Motion Replay (`runs/basilisk/rover_<id>_vizard.csv`)
 - Recommended playback acceleration: **$120\times$ to $600\times$** ($1\text{ s}$ replay video represents $2$ to $10$ minutes of traverse). Do not artificially increase the vehicle physics speed.
 
+---
+
+## 6. Lander Power, Thermal & Direct-to-Earth Comms Formats (Spec §4.2)
+
+### 6.1 Light Illumination & Earth Link Datasets (`data/light/<region>_<range>.npz`)
+Compressed NumPy archive containing topocentric illumination and line-of-sight visibility:
+
+| Key | Type | Units | Description |
+|---|---|---|---|
+| `time_s` | `float64 (N,)` | **seconds (s)** | Elapsed mission time from reference epoch (`2026-11-14T00:00:00Z`). |
+| `sun_fraction` | `float32 (N,)` | **ratio [0.0, 1.0]** | Visible solar disc fraction taking into account finite solar diameter ($0.53^\circ$). |
+| `sun_elevation_deg` | `float32 (N,)` | **degrees (deg)** | Sun elevation above the local horizontal plane. |
+| `sun_azimuth_deg` | `float32 (N,)` | **degrees (deg)** | Sun azimuth clockwise from local North ($[0.0, 360.0^\circ)$). |
+| `earth_visible` | `bool (N,)` | **boolean** | Direct-to-Earth (DTE) radio line-of-sight unocculted by local terrain horizon. |
+| `earth_elevation_deg` | `float32 (N,)` | **degrees (deg)** | Earth elevation above local horizontal. |
+| `earth_azimuth_deg` | `float32 (N,)` | **degrees (deg)** | Earth azimuth clockwise from local North. |
+| `horizon_mask_deg` | `float64 (360,)` | **degrees (deg)** | 360-degree topographic horizon elevation mask derived from DEM raycasting. |
+| `meta` | `string` | JSON | Site metadata, epoch, coordinates, and contact summary statistics. |
+
+### 6.2 Lander Flight Telemetry Log (`runs/basilisk/lander_power_<site>.csv`)
+Recorded every 5 minutes ($300\text{ s}$) over 30-day surface missions:
+
+| Column | Type | Units | Description |
+|---|---|---|---|
+| `time_s` | `float` | **seconds (s)** | Mission elapsed time. |
+| `time_days` | `float` | **days (d)** | Mission elapsed Earth days ($time\_s / 86400$). |
+| `sun_fraction` | `float` | **ratio [0, 1]** | Fraction of solar disc visible above horizon. |
+| `sun_elevation_deg` | `float` | **degrees (deg)** | Solar elevation angle. |
+| `earth_visible` | `int` | **binary {0, 1}** | Direct-to-Earth communications status ($1 = \text{connected}$, $0 = \text{occluded}$). |
+| `earth_elevation_deg`| `float` | **degrees (deg)** | Earth elevation angle above local horizontal. |
+| `power_in_w` | `float` | **Watts (W)** | Solar array electrical power generated: $A_{panel} \cdot S_0 \cdot sun\_fraction \cdot \text{panel\_factor}$. |
+| `load_total_w` | `float` | **Watts (W)** | Sum of all subsystem electrical power draws. |
+| `load_avionics_w` | `float` | **Watts (W)** | Avionics, guidance, and payload sensor power draw. |
+| `load_heaters_w` | `float` | **Watts (W)** | Thermal survival heaters (higher during cold lunar night). |
+| `load_radio_w` | `float` | **Watts (W)** | High-gain radio transmitter power (active during DTE passes). |
+| `load_rover_w` | `float` | **Watts (W)** | Power delivered to docked rover for battery charging. |
+| `net_power_w` | `float` | **Watts (W)** | Net electrical balance: $P_{in} - P_{total\_load}$. |
+| `battery_wh` | `float` | **Watt-hours (Wh)** | Stored energy in lander main battery bank. |
+| `battery_pct` | `float` | **percent (%)** | State-of-Charge relative to battery capacity ($12\text{ kWh}$). |
+| `temperature_c` | `float` | **degrees Celsius (°C)** | Internal equipment bay temperature (simplified thermal model). |
+| `time_to_sunset_s` | `float` | **seconds (s)** | Mission control countdown to next sunset ($-1$ if in night). |
+| `time_to_sunrise_s`| `float` | **seconds (s)** | Mission control countdown to next sunrise ($-1$ if in day). |
+| `time_to_earthset_s`| `float` | **seconds (s)** | Countdown to next Earth link loss ($-1$ if link is down). |
+| `time_to_earthrise_s`| `float`| **seconds (s)** | Countdown to next Earth link restoration. |
+| `status` | `string` | text | Operational status code (e.g., `DAY_NOMINAL_DTE_ACTIVE`, `NIGHT_SURVIVAL_STANDBY`). |
+
+

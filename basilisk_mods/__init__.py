@@ -24,6 +24,11 @@ from .rover import (
     LunarRover,
     export_rover_vizard_mesh,
 )
+from .power_comms import (
+    LanderPowerConfig,
+    LanderPowerState,
+    PowerCommsModule,
+)
 
 __all__ = [
     "R_MOON_M",
@@ -44,4 +49,7 @@ __all__ = [
     "RoverState",
     "LunarRover",
     "export_rover_vizard_mesh",
+    "LanderPowerConfig",
+    "LanderPowerState",
+    "PowerCommsModule",
 ]
