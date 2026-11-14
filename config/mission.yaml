@@ -23,3 +23,67 @@ maneuvers:
     name: Shackleton Crater Rim / South Pole
     lat_deg: -89.66
     lon_deg: 129.2
+thrusters:
+  count: 5
+  max_thrust_N: 800.0
+  steady_isp_s: 310.0
+  layout:
+    center:
+      name: Center Engine (TH1)
+      r_B:
+      - 0.0
+      - 0.0
+      - -0.8
+      tHat_B:
+      - 0.0
+      - 0.0
+      - 1.0
+      canted_deg: 0.0
+    outer_1:
+      name: Outer +X Engine (TH2)
+      r_B:
+      - 0.7
+      - 0.0
+      - -0.75
+      tHat_B:
+      - -0.078459
+      - 0.0
+      - 0.996917
+      canted_deg: 4.5
+    outer_2:
+      name: Outer -X Engine (TH3)
+      r_B:
+      - -0.7
+      - 0.0
+      - -0.75
+      tHat_B:
+      - 0.078459
+      - 0.0
+      - 0.996917
+      canted_deg: 4.5
+    outer_3:
+      name: Outer +Y Engine (TH4)
+      r_B:
+      - 0.0
+      - 0.7
+      - -0.75
+      tHat_B:
+      - 0.0
+      - -0.078459
+      - 0.996917
+      canted_deg: 4.5
+    outer_4:
+      name: Outer -Y Engine (TH5)
+      r_B:
+      - 0.0
+      - -0.7
+      - -0.75
+      tHat_B:
+      - 0.0
+      - 0.078459
+      - 0.996917
+      canted_deg: 4.5
+touchdown_limits:
+  max_vertical_speed_mps: 2.0
+  max_horizontal_speed_mps: 0.5
+  max_tilt_deg: 12.0

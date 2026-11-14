@@ -1,0 +1,37 @@
+{
+  "mission": "Adinfinitum Lunar Lander",
+  "nominal_run": {
+    "run_id": "nominal",
+    "engine_out": false,
+    "touchdown_time_sec": 472.0,
+    "vertical_speed_mps": 1.2,
+    "horizontal_speed_mps": 0.0,
+    "tilt_deg": 0.0,
+    "fuel_remaining_kg": 48.39,
+    "limits": {
+      "max_vertical_speed_mps": 2.0,
+      "max_horizontal_speed_mps": 0.5,
+      "max_tilt_deg": 12.0
+    },
+    "status": "PASS",
+    "telemetry_csv": "C:\\Users\\Priyanka Mokashi\\.gemini\\antigravity\\scratch\\adinfinitum\\runs\\basilisk\\telemetry_nominal.csv",
+    "vizard_file": "C:\\Users\\Priyanka Mokashi\\.gemini\\antigravity\\scratch\\adinfinitum\\runs\\basilisk\\scenario_descent_nominal_UnityViz.bin"
+  },
+  "engine_out_run": {
+    "run_id": "engine_out",
+    "engine_out": true,
+    "touchdown_time_sec": 474.0,
+    "vertical_speed_mps": 1.2,
+    "horizontal_speed_mps": 0.0,
+    "tilt_deg": 0.0,
+    "fuel_remaining_kg": 54.28,
+    "limits": {
+      "max_vertical_speed_mps": 2.0,
+      "max_horizontal_speed_mps": 0.5,
+      "max_tilt_deg": 12.0
+    },
+    "status": "PASS",
+    "telemetry_csv": "C:\\Users\\Priyanka Mokashi\\.gemini\\antigravity\\scratch\\adinfinitum\\runs\\basilisk\\telemetry_engine_out.csv",
+    "vizard_file": "C:\\Users\\Priyanka Mokashi\\.gemini\\antigravity\\scratch\\adinfinitum\\runs\\basilisk\\scenario_descent_engine_out_UnityViz.bin"
+  }
+}
