@@ -277,3 +277,33 @@ def test_ghost_upload_endpoint_saves_valid_rejects_invalid_and_blocks_bad_names(
         listing = client.get("/api/ghosts").json()
         assert [f["name"] for f in listing] == ["rover_test_2027-09-01.json"] and listing[0]["summary"]["n_runs"] == 3
         assert client.get("/api/ghosts/rover_test_2027-09-01.json").json()["kind"] == "rover"
+
+
+def test_glb_to_obj_rotates_gltf_axes_into_the_body_frame(tmp_path) -> None:
+    """glTF (Y up, front -Z) becomes the simulator body frame (Z up, front +x): height lands on z, front on +x."""
+    import importlib.util
+    from pathlib import Path
+
+    import pytest
+
+    trimesh = pytest.importorskip("trimesh")
+    spec = importlib.util.spec_from_file_location("glb_to_obj", Path(__file__).resolve().parents[1] / "vizard" / "glb_to_obj.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert math.isclose(float(np.linalg.det(mod.GLTF_TO_BODY)), 1.0)  # a proper rotation, no mirroring
+    box = trimesh.creation.box(extents=[2.0, 6.0, 4.0])  # glTF x = 2 (sideways), y = 6 (up), z = 4 (front/back)
+    box.apply_translation([0.0, 3.0, -2.0])  # sits on y = 0..6, reaches 2 m to the front (-z)
+    glb = tmp_path / "box.glb"
+    trimesh.Scene(box).export(str(glb))
+    info = mod.convert(glb, tmp_path / "box.obj")
+    assert info["min_m"] == [0.0, -1.0, 0.0] and info["max_m"] == [4.0, 1.0, 6.0]  # front +x, sideways y, up z
+    assert (tmp_path / "box.mtl").is_file()
+
+
+def test_server_serves_the_3d_showcase_next_to_the_2d_mission_control() -> None:
+    """/showcase/ serves the 3D film page; the Mission Control page at / stays the 2D one."""
+    with TestClient(create_app(seed=1, record=False)) as client:
+        show = client.get("/showcase/")
+        assert show.status_code == 200 and "showcase.js" in show.text
+        assert client.get("/showcase/models/lander_B.glb").status_code == 200
+        assert "three" not in client.get("/").text.lower()

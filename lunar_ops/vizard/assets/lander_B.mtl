@@ -1,0 +1,107 @@
+newmtl white_paint_v3
+Kd 0.8980 0.8980 0.8784
+Ka 0.1796 0.1796 0.1757
+Ks 0.150 0.150 0.150
+Ns 110.0
+d 1.0
+illum 2
+map_Kd lander_B_white_paint_v3.png
+
+newmtl aluminium_v3
+Kd 0.8510 0.8588 0.8784
+Ka 0.1702 0.1718 0.1757
+Ks 0.690 0.690 0.690
+Ns 136.0
+d 1.0
+illum 2
+map_Kd lander_B_aluminium_v3.png
+
+newmtl black_kapton_v3
+Kd 0.0196 0.0196 0.0235
+Ka 0.0039 0.0039 0.0047
+Ks 0.330 0.330 0.330
+Ns 130.0
+d 1.0
+illum 2
+map_Kd lander_B_black_kapton_v3.png
+
+newmtl gold_foil_MLI_v3
+Kd 1.0000 0.7608 0.3216
+Ka 0.2000 0.1522 0.0643
+Ks 0.660 0.660 0.660
+Ns 140.0
+d 1.0
+illum 2
+map_Kd lander_B_gold_foil_MLI_v3.png
+
+newmtl optics_glass
+Kd 0.0196 0.0314 0.0510
+Ka 0.0039 0.0063 0.0102
+Ks 0.150 0.150 0.150
+Ns 190.0
+d 1.0
+illum 2
+map_Kd lander_B_optics_glass.png
+
+newmtl nozzle_niobium_v3
+Kd 0.4196 0.4000 0.4196
+Ka 0.0839 0.0800 0.0839
+Ks 0.150 0.150 0.150
+Ns 130.0
+d 1.0
+illum 2
+map_Kd lander_B_nozzle_niobium_v3.png
+
+newmtl nozzle_inner_v3
+Kd 0.0784 0.0706 0.0706
+Ka 0.0157 0.0141 0.0141
+Ks 0.690 0.690 0.690
+Ns 100.0
+d 1.0
+illum 2
+map_Kd lander_B_nozzle_inner_v3.png
+
+newmtl silver_foil_MLI_v3
+Kd 0.8980 0.8980 0.9294
+Ka 0.1796 0.1796 0.1859
+Ks 0.630 0.630 0.630
+Ns 144.0
+d 1.0
+illum 2
+map_Kd lander_B_silver_foil_MLI_v3.png
+
+newmtl remove_before_flight
+Kd 0.7490 0.0510 0.0510
+Ka 0.1498 0.0102 0.0102
+Ks 0.150 0.150 0.150
+Ns 80.0
+d 1.0
+illum 2
+map_Kd lander_B_remove_before_flight.png
+
+newmtl instrument_orange
+Kd 0.8510 0.4196 0.1020
+Ka 0.1702 0.0839 0.0204
+Ks 0.210 0.210 0.210
+Ns 100.0
+d 1.0
+illum 2
+map_Kd lander_B_instrument_orange.png
+
+newmtl solar_cell_v3
+Kd 0.0510 0.0902 0.2784
+Ka 0.0102 0.0180 0.0557
+Ks 0.510 0.510 0.510
+Ns 176.0
+d 1.0
+illum 2
+map_Kd lander_B_solar_cell_v3.png
+
+newmtl panel_back_v3
+Kd 0.5490 0.5490 0.5804
+Ka 0.1098 0.1098 0.1161
+Ks 0.390 0.390 0.390
+Ns 100.0
+d 1.0
+illum 2
+map_Kd lander_B_panel_back_v3.png

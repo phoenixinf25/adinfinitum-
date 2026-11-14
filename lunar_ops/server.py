@@ -44,6 +44,7 @@ from lunar_ops.protocol import DEFAULT_MODELS, PROTOCOL_VERSION, FrameBuilder, w
 from lunar_ops.rover import Action
 
 UI_DIR = Path(__file__).parent / "ui"
+SHOWCASE_DIR = Path(__file__).parent / "showcase"
 RUNS_DIR = Path(__file__).resolve().parents[1] / "runs" / "ops"
 TRAIN_LOG = Path(__file__).resolve().parents[1] / "runs" / "rover" / "train_log.jsonl"
 TRAIN_LOG_MAX_ROWS = 2000  # [-] most recent rows returned by /api/training
@@ -398,6 +399,8 @@ def create_app(policy_spec: str | None = None, seed: int = 0, record: bool = Tru
             await sess.broadcast(sess.models_message())
             sess.pending.append({"t_s": sess.obs["t_s"], "kind": "agent", "msg": "AI agent disconnected: baseline policy resumes"})
 
+    if SHOWCASE_DIR.is_dir():  # 3D mission showcase (three.js); Mission Control itself stays 2D
+        app.mount("/showcase", StaticFiles(directory=SHOWCASE_DIR, html=True), name="showcase")
     app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")
     return app
 

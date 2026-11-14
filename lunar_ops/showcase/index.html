@@ -1,0 +1,39 @@
+<!doctype html>
+<!--
+  Copyright (c) 2026, Adinfinitium team
+
+  Permission to use, copy, modify, and/or distribute this software for any
+  purpose with or without fee is hereby granted, provided that the above
+  copyright notice and this permission notice appear in all copies.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Adinfinitium · Mission showcase</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">{ "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/" } }</script>
+</head>
+<body class="ui-on">
+<canvas id="gl"></canvas>
+<div id="labels"></div>
+<div id="fade"></div>
+
+<div id="brand">Adinfinitium</div>
+<div id="title"><h1 id="title-h">Loading the mission…</h1><p id="title-p">Preparing the Moon, the terrain and the vehicles.</p></div>
+<div id="note">Simulated mission · terrain NASA LRO LOLA and image LROC (observed)</div>
+
+<footer id="bar">
+  <button id="play" class="icon" title="Play / pause (space)" aria-label="Pause">❚❚</button>
+  <div id="track"><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Mission timeline"></div>
+  <span id="clock" class="num">00:00</span>
+  <div class="seg"><button id="zout" class="icon" title="Zoom out (− or scroll)" aria-label="Zoom out">−</button><button id="zin" class="icon" title="Zoom in (+ or scroll)" aria-label="Zoom in">+</button></div>
+  <div class="seg" id="cam"><button data-v="cine" class="on">Cinematic</button><button data-v="free">Free look</button></div>
+  <div class="seg" id="quality"><button data-v="high" class="on">High</button><button data-v="ultra">Ultra</button></div>
+  <button id="labelsBtn" class="on">Labels</button>
+  <button id="full" title="Full screen (F)">Full screen</button>
+</footer>
+
+<script type="module" src="showcase.js"></script>
+</body>
+</html>
