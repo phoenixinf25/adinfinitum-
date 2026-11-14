@@ -54,6 +54,15 @@ def make_crater_tile(region: str = "demo_craters", size: int = 400, mpp: float =
     # Baseline PSR mask: deep depressions shadowed by steep rims in polar geometry
     psr_mask = (height < -25.0) & (r_main < rad_main * 0.85)
 
+    # Compute polar stereographic coordinates in metres (lat_ts=-90, lon_0=0, R=1737400 m)
+    colat = np.radians(90.0 + center_lat_deg)
+    r_center = 2.0 * 1737400.0 * np.tan(colat / 2.0)
+    lon_rad = np.radians(center_lon_deg)
+    center_x = float(r_center * np.sin(lon_rad))
+    center_y = float(-r_center * np.cos(lon_rad))
+    x_m = (center_x + xs).astype(np.float32)
+    y_m = (center_y + xs[::-1]).astype(np.float32)
+
     meta = {
         "region": region,
         "meters_per_pixel": float(mpp),
@@ -64,7 +73,11 @@ def make_crater_tile(region: str = "demo_craters", size: int = 400, mpp: float =
         "source": "LOLA Polar Stereographic Terrain Model (synthetic demo tile)",
         "units": {
             "height": "m",
+            "height_m": "m",
             "slope": "deg",
+            "slope_deg": "deg",
+            "x_m": "m (polar-stereographic easting)",
+            "y_m": "m (polar-stereographic northing)",
             "hazard": "probability 0..1",
             "uncertainty": "m (1-sigma)",
             "psr_mask": "bool"
@@ -77,7 +90,11 @@ def make_crater_tile(region: str = "demo_craters", size: int = 400, mpp: float =
     np.savez_compressed(
         out_path,
         height=height.astype(np.float32),
+        height_m=height.astype(np.float32),
         slope=slope.astype(np.float32),
+        slope_deg=slope.astype(np.float32),
+        x_m=x_m,
+        y_m=y_m,
         hazard=hazard.astype(np.float32),
         uncertainty=uncertainty.astype(np.float32),
         psr_mask=psr_mask.astype(bool),
