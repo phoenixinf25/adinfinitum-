@@ -1,0 +1,26 @@
+{
+  "mission": "Adinfinitum Lunar Lander (NASA Space Apps 2026)",
+  "event": "Powered Descent Initiation (PDI)",
+  "central_body": "Moon",
+  "time_epoch_sec": 5211.84,
+  "time_from_burn_sec": 3411.84,
+  "periapsis_altitude_km": 15.0,
+  "spacecraft_mass_kg": 800.0,
+  "position_inertial_m": [
+    48127.523173823174,
+    -1.0726310384864538e-10,
+    -1751739.4227188758
+  ],
+  "velocity_inertial_mps": [
+    1691.693829053662,
+    2.861081342854192e-15,
+    46.725004219116876
+  ],
+  "target_region": {
+    "name": "Shackleton Crater Rim / South Pole",
+    "lat_deg": -89.66,
+    "lon_deg": 129.2
+  },
+  "delta_v_deorbit_mps": 19.45,
+  "vizard_file": "C:\\Users\\Priyanka Mokashi\\.gemini\\antigravity\\scratch\\adinfinitum\\runs\\basilisk\\scenario_orbit_release_UnityViz.bin"
+}

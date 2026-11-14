@@ -1,0 +1,25 @@
+mission_name: Adinfinitum Lunar Lander (NASA Space Apps 2026)
+central_body: Moon
+spacecraft:
+  propulsion_module:
+    dry_mass_kg: 550.0
+    fuel_mass_kg: 1450.0
+    wet_mass_kg: 2000.0
+  lander:
+    dry_mass_kg: 350.0
+    fuel_mass_kg: 450.0
+    wet_mass_kg: 800.0
+  combined_stack:
+    total_mass_kg: 2800.0
+orbit:
+  initial_altitude_km: 100.0
+  inclination_deg: 90.0
+  eccentricity: 0.0001
+  true_anomaly_deg: 0.0
+maneuvers:
+  release_time_sec: 1800.0
+  target_periapsis_km: 15.0
+  target_region:
+    name: Shackleton Crater Rim / South Pole
+    lat_deg: -89.66
+    lon_deg: 129.2
