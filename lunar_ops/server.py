@@ -30,11 +30,12 @@ from typing import Any
 
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from lunar_ops.config import MissionConfig
+from lunar_ops import ghosts
 from lunar_ops.env import RoverEnv
 from lunar_ops.policies import HeuristicPolicy, Policy
 import copy
@@ -205,9 +206,14 @@ class Session:
             self.clients.discard(ws)
 
 
-def create_app(policy_spec: str | None = None, seed: int = 0, record: bool = True) -> FastAPI:
-    """Build the FastAPI application."""
+def create_app(policy_spec: str | None = None, seed: int = 0, record: bool = True,
+               ghost_dir: Path | None = None) -> FastAPI:
+    """Build the FastAPI application.
+
+    :param ghost_dir: folder for uploaded ghost files (default ``runs/ghosts``).
+    """
     sess = Session(policy_spec, seed, record)
+    gdir = ghost_dir or ghosts.GHOST_DIR
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -295,6 +301,31 @@ def create_app(policy_spec: str | None = None, seed: int = 0, record: bool = Tru
                     continue  # a partially written last line is expected while training runs
         return {"path": "runs/rover/train_log.jsonl", "rows": rows}
 
+    @app.get("/api/ghosts")
+    def ghost_list() -> list[dict[str, Any]]:
+        """List stored ghost files and assets."""
+        return ghosts.list_files(gdir)
+
+    @app.post("/api/ghosts/{name}")
+    async def ghost_upload(name: str, request: Request) -> JSONResponse:
+        """Validate and store an uploaded ghost file (raw request body). Malformed ghost files are rejected."""
+        try:
+            result = ghosts.save_file(gdir, name, await request.body())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(result, status_code=200 if result["saved"] else 422)
+
+    @app.get("/api/ghosts/{name}")
+    def ghost_get(name: str) -> FileResponse:
+        """Return one stored ghost file."""
+        try:
+            path = gdir / ghosts.safe_name(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="no such file")
+        return FileResponse(path)
+
     @app.websocket("/ws/ingest")
     async def ws_ingest(ws: WebSocket) -> None:
         """Accept ``world`` / ``frame`` / ``models`` messages from an external producer and relay them to the UIs.
@@ -379,8 +410,9 @@ def main() -> None:
     ap.add_argument("--policy", default=None, help="module:Class of an in-process Policy")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-record", action="store_true")
+    ap.add_argument("--ghost-dir", default=None, help="folder for uploaded ghost files (default runs/ghosts)")
     a = ap.parse_args()
-    uvicorn.run(create_app(a.policy, a.seed, not a.no_record), host=a.host, port=a.port, log_level="warning")
+    uvicorn.run(create_app(a.policy, a.seed, not a.no_record, Path(a.ghost_dir) if a.ghost_dir else None), host=a.host, port=a.port, log_level="warning")
 
 
 if __name__ == "__main__":

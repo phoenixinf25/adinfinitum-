@@ -1,0 +1,144 @@
+<!doctype html>
+<!--
+  Copyright (c) 2026, Adinfinitium team
+
+  Permission to use, copy, modify, and/or distribute this software for any
+  purpose with or without fee is hereby granted, provided that the above
+  copyright notice and this permission notice appear in all copies.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Adinfinitium · Mission Control</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <aside id="side">
+    <div class="brand">Adinfinitium<small>Mission Control</small></div>
+    <nav id="nav">
+      <button data-v="overview">Overview</button>
+      <button data-v="map">Map</button>
+      <button data-v="landing">Landing</button>
+      <button data-v="rover">Rover</button>
+      <button data-v="sun">Sun and Earth</button>
+      <button data-v="ice">Ice</button>
+      <button data-v="ai">AI helpers</button>
+      <button data-v="log">What it decided</button>
+      <button data-v="real">How real is this?</button>
+    </nav>
+    <div class="sidefoot">
+      <div id="conn" class="off">Not connected</div>
+      <div id="control" class="dim">—</div>
+      <p>Some of this is a computer model, not a measurement. See “How real is this?”.</p>
+    </div>
+  </aside>
+
+  <section id="stage">
+    <header id="now">
+      <div id="nowstep">—</div>
+      <h1 id="nowtext">Waiting for the mission to start…</h1>
+    </header>
+
+    <div id="views">
+
+      <!-- OVERVIEW -->
+      <section class="view" id="v-overview">
+        <ol id="steps"></ol>
+        <div class="grid3">
+          <div class="card"><h2>Where is it?</h2><p class="hint">The area around the landing spot, seen from above. North is up.</p><div class="canvasbox sq"><canvas id="minimap"></canvas></div></div>
+          <div class="card"><h2>Is everything OK?</h2><p class="hint">Blue is fine. Orange needs attention.</p><ul id="checks"></ul></div>
+          <div class="card"><h2>Latest news</h2><p class="hint">The newest things the mission did or decided.</p><ul id="news"></ul></div>
+        </div>
+        <div class="tiles" id="overtiles"></div>
+      </section>
+
+      <!-- MAP -->
+      <section class="view" id="v-map">
+        <div class="mapcol">
+          <div id="maplayers"></div>
+          <p class="hint" id="layerhelp"></p>
+          <div class="canvasbox big"><canvas id="map"></canvas><div id="maptip">Point at the map to read the ground there.</div></div>
+        </div>
+        <div class="card side">
+          <h2>What the symbols mean</h2>
+          <ul class="legend">
+            <li><i class="sym ring open"></i>Place to look for ice, not visited yet</li>
+            <li><i class="sym ring done"></i>Place that has been sampled</li>
+            <li><i class="sym square"></i>Where the lander touched down</li>
+            <li><i class="sym arrow"></i>The rover (it points the way it faces)</li>
+            <li><i class="sym line"></i>Where the rover has driven</li>
+            <li><i class="sym dash"></i>Where the rover plans to drive</li>
+            <li><i class="sym dot"></i>The lander, while it is coming down</li>
+          </ul>
+          <p class="hint">The white bar on the map is 100 metres long.</p>
+        </div>
+      </section>
+
+      <!-- LANDING -->
+      <section class="view" id="v-landing">
+        <div class="grid2">
+          <div class="card"><h2>Circling the Moon</h2><p class="hint">The lander goes round and round over the poles. The circle marks where we want to land.</p><div class="canvasbox wide"><canvas id="orbit"></canvas></div></div>
+          <div class="card"><h2>Coming down</h2><p class="hint">Blue is how high it is. Orange is how fast it is falling. Both should reach zero together.</p><div class="canvasbox wide"><canvas id="descent"></canvas></div></div>
+        </div>
+        <div class="card"><h2>Engines</h2><p class="hint">Five engines slow the lander down. If one breaks, the opposite one is turned off so it stays balanced.</p><div id="engines"></div></div>
+        <div class="tiles" id="landtiles"></div>
+      </section>
+
+      <!-- ROVER -->
+      <section class="view" id="v-rover">
+        <div class="card"><h2>Battery</h2><p class="hint">The rover needs sunlight to charge. Orange dashes mark the level where it must stop and save power.</p><div class="canvasbox wide"><canvas id="battery"></canvas></div></div>
+        <div class="tiles" id="rovertiles"></div>
+      </section>
+
+      <!-- SUN AND EARTH -->
+      <section class="view" id="v-sun">
+        <div class="card"><h2>Where are the Sun and Earth in the sky?</h2><p class="hint">Left to right is the compass direction. Up is height above the horizon. Below the line means hidden behind the ground.</p><div class="canvasbox wide"><canvas id="sky"></canvas></div></div>
+        <div class="tiles" id="suntiles"></div>
+      </section>
+
+      <!-- ICE -->
+      <section class="view" id="v-ice">
+        <div class="card"><h2 id="icetitle">Places to look for ice</h2><p class="hint">Each place has a score from 0 to 1 for how strong the signs of ice are. These are signs, not proof.</p><ul id="icelist"></ul></div>
+        <div class="tiles" id="icetiles"></div>
+      </section>
+
+      <!-- AI -->
+      <section class="view" id="v-ai">
+        <div class="card"><h2>The AI helpers</h2><p class="hint">Each helper does one job. If one is not connected, a simple backup does the job instead.</p><ul id="ailist"></ul></div>
+        <div class="card" id="traincard" hidden><h2>How the rover is learning</h2><p class="hint">Blue goes up when it gets better. Orange goes down when it makes fewer mistakes.</p><div class="canvasbox wide"><canvas id="train"></canvas></div></div>
+      </section>
+
+      <!-- LOG -->
+      <section class="view" id="v-log">
+        <div class="card"><h2>Everything the mission decided <span id="logcount"></span></h2><p class="hint">Newest at the top. Each line says what happened, and why.</p><ul id="log"></ul></div>
+      </section>
+
+      <!-- REAL -->
+      <section class="view" id="v-real">
+        <div class="card"><h2>How real is each part?</h2><p class="hint">We tell you honestly which parts are real measurements and which are a computer model.</p><ul id="reallist"></ul></div>
+      </section>
+
+    </div>
+  </section>
+
+  <footer id="scrub">
+    <button id="play" title="Play / pause (space)">Pause</button>
+    <button id="slower" title="Slower">Slower</button>
+    <input id="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Mission time">
+    <button id="faster" title="Faster">Faster</button>
+    <span class="clock"><small>Time since start</small><b id="simclock">0 d 00:00:00</b></span>
+    <span class="clock"><small>Speed</small><b id="speedlab">1×</b></span>
+    <span class="spacer"></span>
+    <label class="manual" title="Keys W, A and D drive the rover"><input type="checkbox" id="override"> Drive it myself</label>
+    <button id="openfile" title="Open a recorded .jsonl run">Open a recording</button>
+    <button id="abort" title="Stop the rover and keep it safe (live backend only)">Stop rover</button>
+  </footer>
+</div>
+<div id="notice" hidden></div>
+<input type="file" id="filepick" accept=".jsonl,.json" hidden>
+<script src="app.js"></script>
+</body>
+</html>

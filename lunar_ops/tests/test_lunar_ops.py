@@ -216,9 +216,64 @@ def test_training_endpoint_returns_rows_list() -> None:
 
 
 def test_ui_is_two_dimensional_only() -> None:
-    """The served mission-control page loads no 3D engine: 3D is left to Basilisk / Vizard."""
+    """The served mission-control page loads no 3D engine (3D is left to Basilisk / Vizard); only 2D chart libraries are vendored."""
     from pathlib import Path
 
     ui = Path(__file__).resolve().parents[1] / "ui"
-    text = (ui / "index.html").read_text(encoding="utf-8") + (ui / "app.js").read_text(encoding="utf-8")
-    assert "three" not in text.lower() and not (ui / "vendor").exists()
+    own = [ui / "index.html", *sorted(ui.glob("*.js"))]  # our own files; ui/vendor holds third-party chart and number libraries
+    text = "".join(p.read_text(encoding="utf-8") for p in own)
+    assert "three" not in text.lower()
+    assert not [p for p in (ui / "vendor").rglob("*") if p.is_file() and "three" in p.name.lower()]
+
+
+def _tiny_ghost_bytes() -> bytes:
+    from pathlib import Path
+
+    return (Path(__file__).parent / "fixtures" / "ghost_rover_tiny.json").read_bytes()
+
+
+def test_tiny_ghost_fixture_is_valid_and_summarised() -> None:
+    """The 3-run fixture (one best, one battery death, one timeout) validates and is summarised correctly."""
+    import json
+
+    from lunar_ops.ghosts import validate_ghost
+
+    rep = validate_ghost(json.loads(_tiny_ghost_bytes()))
+    assert rep["ok"] and not rep["errors"]
+    assert rep["summary"]["n_runs"] == 3 and rep["summary"]["best"] == "best"
+    assert rep["summary"]["outcomes"] == {"returned": 1, "died_battery": 1, "timeout": 1}
+
+
+def test_ghost_validation_rejects_malformed_files_without_repairing_them() -> None:
+    """Missing or mismatched fields are reported as errors; the file is never fixed up."""
+    import json
+
+    from lunar_ops.ghosts import validate_ghost
+
+    g = json.loads(_tiny_ghost_bytes())
+    g["runs"][1]["xyz_m"] = g["runs"][1]["xyz_m"][:-1]  # one sample short
+    del g["runs"][2]["outcome"]
+    rep = validate_ghost(g)
+    assert not rep["ok"]
+    assert any("xyz_m" in e for e in rep["errors"]) and any("outcome" in e for e in rep["errors"])
+    assert not validate_ghost({"kind": "boat"})["ok"] and not validate_ghost([1, 2])["ok"]
+
+
+def test_ghost_upload_endpoint_saves_valid_rejects_invalid_and_blocks_bad_names(tmp_path) -> None:
+    """POST /api/ghosts/<name> stores a valid ghost, answers 422 for an invalid one and 400 for a path-like name."""
+    import json
+
+    app = create_app(seed=1, record=False, ghost_dir=tmp_path)
+    with TestClient(app) as client:
+        ok = client.post("/api/ghosts/rover_test_2027-09-01.json", content=_tiny_ghost_bytes())
+        assert ok.status_code == 200 and ok.json()["saved"] and (tmp_path / "rover_test_2027-09-01.json").is_file()
+        bad = json.loads(_tiny_ghost_bytes())
+        bad["runs"][0]["t_s"] = []
+        r = client.post("/api/ghosts/bad.json", content=json.dumps(bad).encode())
+        assert r.status_code == 422 and not r.json()["saved"] and not (tmp_path / "bad.json").exists()
+        assert client.post("/api/ghosts/..%2Fevil.json", content=b"{}").status_code in (400, 404, 405)
+        assert not (tmp_path.parent / "evil.json").exists() and not (tmp_path / "evil.json").exists()
+        assert client.post("/api/ghosts/notes.exe", content=b"x").status_code == 400
+        listing = client.get("/api/ghosts").json()
+        assert [f["name"] for f in listing] == ["rover_test_2027-09-01.json"] and listing[0]["summary"]["n_runs"] == 3
+        assert client.get("/api/ghosts/rover_test_2027-09-01.json").json()["kind"] == "rover"

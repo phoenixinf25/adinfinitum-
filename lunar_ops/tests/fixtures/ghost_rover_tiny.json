@@ -1,0 +1,135 @@
+{
+ "kind": "rover",
+ "region": "test_region",
+ "frame": "tile ENU metres, origin = tile centre, z up",
+ "dt_s": 3600.0,
+ "terrain_obj": "terrain.obj",
+ "models": {
+  "rover": "rover.obj"
+ },
+ "runs": [
+  {
+   "id": "best",
+   "policy": "learned",
+   "outcome": "returned",
+   "best": true,
+   "fail_t_s": null,
+   "t_s": [
+    0.0,
+    3600.0,
+    7200.0,
+    10800.0
+   ],
+   "xyz_m": [
+    [
+     0,
+     0,
+     0
+    ],
+    [
+     10,
+     10,
+     1
+    ],
+    [
+     20,
+     20,
+     2
+    ],
+    [
+     30,
+     30,
+     3
+    ]
+   ],
+   "heading_deg": [
+    45.0,
+    45.0,
+    45.0,
+    45.0
+   ]
+  },
+  {
+   "id": "dead",
+   "policy": "naive",
+   "outcome": "died_battery",
+   "best": false,
+   "fail_t_s": 7200.0,
+   "t_s": [
+    0.0,
+    3600.0,
+    7200.0,
+    10800.0
+   ],
+   "xyz_m": [
+    [
+     0,
+     0,
+     0
+    ],
+    [
+     -10,
+     10,
+     1
+    ],
+    [
+     -20,
+     15,
+     2
+    ],
+    [
+     -25,
+     18,
+     2
+    ]
+   ],
+   "heading_deg": [
+    45.0,
+    45.0,
+    45.0,
+    45.0
+   ]
+  },
+  {
+   "id": "late",
+   "policy": "cautious",
+   "outcome": "timeout",
+   "best": false,
+   "fail_t_s": 10800.0,
+   "t_s": [
+    0.0,
+    3600.0,
+    7200.0,
+    10800.0
+   ],
+   "xyz_m": [
+    [
+     0,
+     0,
+     0
+    ],
+    [
+     5,
+     -10,
+     0
+    ],
+    [
+     10,
+     -20,
+     -1
+    ],
+    [
+     12,
+     -25,
+     -1
+    ]
+   ],
+   "heading_deg": [
+    45.0,
+    45.0,
+    45.0,
+    45.0
+   ]
+  }
+ ]
+}

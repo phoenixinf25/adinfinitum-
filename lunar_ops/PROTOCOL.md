@@ -114,3 +114,40 @@ Terrain is **GENERATED**, ice layers are **MODELLED** evidence, and the rover pa
 `lunar_ops/config.py` are **ASSUMED**. The UI shows these labels permanently. A backend that
 supplies real data should change the `provenance` map in its `world` message; the UI displays it.
 Never describe a layer as showing where ice *is*; say *ice evidence*.
+
+
+## 5. Ghost files (replay of recorded, simulated runs)
+
+The **Ghosts** tab replays recorded attempts side by side: which one won, and where the others failed. Drop files on the
+page (or use *Add files*) and they are checked, shown at once and stored in `runs/ghosts/` by the server
+(`POST /api/ghosts/<name>` with the raw file, `GET /api/ghosts` to list, `GET /api/ghosts/<name>` to read).
+Mission control only replays what a file contains: nothing is invented, tuned or repaired. A file with missing or wrong
+fields is rejected with a list of what is wrong (HTTP 422) so the producer can fix it.
+
+```json
+{"kind": "rover" | "lander", "region": "lola5m_site23", "frame": "tile ENU metres, origin = tile centre, z up",
+ "dt_s": 3600.0, "terrain_obj": "<path>", "models": {"rover": "rover.glb", "lander": "lander.glb"},
+ "runs": [{"id": "...", "policy": "...", "outcome": "returned", "best": true, "fail_t_s": null,
+           "t_s": [0.0, ...], "xyz_m": [[x, y, z], ...], "heading_deg": [...]}]}
+```
+
+Required: `kind`, `region`, `dt_s` (> 0), and per run `id` (unique), `policy`, `outcome`, `best` (boolean), `fail_t_s`
+(number or `null`), `t_s` (non-decreasing), `xyz_m` (one `[x, y, z]` per `t_s`). `heading_deg` is optional, one value per
+`t_s` when present. Known outcomes: `returned, reached_ice_only, died_battery, blocked, timeout, ok, hard_vertical,
+hard_horizontal, steep_slope, hazard_cell, out_of_fuel, out_of_bounds`; other strings load with a warning and are drawn
+as a failure. A run with `fail_t_s` is frozen there with its outcome written next to it. At most 12 runs are drawn by
+default (always the best, and at least 2 of each failure type); *Show all runs* draws every run.
+Open question for the producer: the direction convention of `heading_deg` (the page does not rotate markers by it).
+
+Everything shown is MODELLED (simulated). The checks live in `lunar_ops/ghosts.py` (server) and `ui/ghosts.js` (page).
+
+## 6. Site imagery
+
+The **Imagery** tab draws the observed LROC mosaic of the site (`ui/assets/<site>/photo_1m.jpg`, 1 m/px, and the 2 m/px
+context image) with the lander and rover on top. The tile photo is assumed to cover exactly the tile (x east, y north,
+row 0 north). Where the photo is black (permanent shadow) the LOLA elevation hillshade is blended in, and the caption says so.
+
+## 7. Third-party code
+
+`ui/vendor/` holds MIT-licensed code copied from npm (see `ui/vendor/README.md`): OpenUI's browser bundle (the **Charts**
+tab) and NumberFlow (rolling numbers). The **Colour / Black & white** switch in the top bar applies a greyscale filter to the whole page.
