@@ -80,3 +80,7 @@ build/
 /src/**/target/
 /src/**/Cargo.lock
 !/src/Cargo.lock
+
+# Exclude Basilisk CI workflows (requires 'workflow' PAT scope)
+.github/workflows/
+.github/actions/
