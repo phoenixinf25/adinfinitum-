@@ -9,6 +9,7 @@ import { EffectComposer } from './vendor/EffectComposer.js';
 import { RenderPass } from './vendor/RenderPass.js';
 import { UnrealBloomPass } from './vendor/UnrealBloomPass.js';
 import { OutputPass } from './vendor/OutputPass.js';
+import { ShaderPass } from './vendor/ShaderPass.js';
 
 const $ = (id) => document.getElementById(id), Q = new URLSearchParams(location.search);
 const DEG = Math.PI / 180, R_MOON = 1737.4e3; // [m] mean lunar radius
@@ -25,14 +26,24 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicD
 renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFShadowMap;
 const camera = new THREE.PerspectiveCamera(36, 1, 0.05, 3e9);
 const controls = new OrbitControls(camera, canvas); controls.enableDamping = true; controls.dampingFactor = 0.07; controls.enabled = false;
-const composer = new EffectComposer(renderer), renderPass = new RenderPass(null, camera);
+const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 })), renderPass = new RenderPass(null, camera); // 4x MSAA: clean edges
 const bloom = new UnrealBloomPass(new THREE.Vector2(512, 512), 0.5, 0.6, 0.9);
-composer.addPass(renderPass); composer.addPass(bloom); composer.addPass(new OutputPass());
+// Film grade: gentle vignette, cool shadows / warm highlights and fine animated grain, applied after tone mapping.
+const grade = new ShaderPass({ uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uRes: { value: new THREE.Vector2(1, 1) } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; uniform float uTime; uniform vec2 uRes; varying vec2 vUv;
+    float h(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+    void main(){ vec3 c = texture2D(tDiffuse, vUv).rgb; float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      c = mix(c * vec3(0.94, 0.98, 1.06), c * vec3(1.04, 1.0, 0.95), smoothstep(0.15, 0.8, l)); // cool shadows, warm highlights
+      vec2 q = vUv - 0.5; q.x *= uRes.x / uRes.y; c *= 1.0 - 0.32 * smoothstep(0.35, 1.05, length(q)); // vignette
+      c += (h(vUv * uRes + fract(uTime) * 91.7) - 0.5) * 0.022; // fine grain
+      gl_FragColor = vec4(c, 1.0); }` });
+composer.addPass(renderPass); composer.addPass(bloom); composer.addPass(new OutputPass()); composer.addPass(grade);
 const S = { quality: Q.get('quality') || 'high', cam: 'cine', playing: true, T: 0, zoom: 1, labels: true, ready: false, chapter: -1 };
 function resize() {
   const dpr = window.devicePixelRatio || 1, pr = S.quality === 'ultra' ? Math.min(dpr * 1.5, 3) : Math.min(dpr, 2);
   renderer.setPixelRatio(pr); renderer.setSize(innerWidth, innerHeight, false); composer.setPixelRatio(pr); composer.setSize(innerWidth, innerHeight);
-  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); grade.uniforms.uRes.value.set(innerWidth * pr, innerHeight * pr);
 }
 addEventListener('resize', resize);
 
@@ -148,12 +159,20 @@ function llr(lat, lon, r) { const la = lat * DEG, lo = lon * DEG; return new THR
 function moonMaterial(map) {
   const m = new THREE.MeshStandardMaterial({ map, roughness: 1, metalness: 0, color: new THREE.Color(1.2, 1.2, 1.2) });
   m.onBeforeCompile = (sh) => {
-    sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vMoonP;').replace('#include <begin_vertex>', '#include <begin_vertex>\nvMoonP = position;');
-    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec3 vMoonP;').replace('#include <map_fragment>', `
+    sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vMoonP; varying vec3 vMoonW;').replace('#include <begin_vertex>', '#include <begin_vertex>\nvMoonP = position; vMoonW = (modelMatrix * vec4(position, 1.0)).xyz;');
+    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', `#include <common>
+varying vec3 vMoonP; varying vec3 vMoonW;
+float mh(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+float mn(vec3 p){ vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(mh(i), mh(i + vec3(1,0,0)), f.x), mix(mh(i + vec3(0,1,0)), mh(i + vec3(1,1,0)), f.x), f.y), mix(mix(mh(i + vec3(0,0,1)), mh(i + vec3(1,0,1)), f.x), mix(mh(i + vec3(0,1,1)), mh(i + vec3(1,1,1)), f.x), f.y), f.z); }`).replace('#include <map_fragment>', `
       vec3 qm = normalize(vMoonP); float um = atan(qm.z, -qm.x) / 6.28318530718; float uA = fract(um);
       vec2 uvm = vec2(uA, 1.0 - acos(clamp(qm.y, -1.0, 1.0)) / 3.14159265359);
       vec2 dA = vec2(dFdx(uA), dFdy(uA)), dB = vec2(dFdx(um), dFdy(um)); vec2 du = (abs(dA.x) + abs(dA.y) < abs(dB.x) + abs(dB.y)) ? dA : dB;
-      vec4 sampledDiffuseColor = textureGrad(map, uvm, vec2(du.x, dFdx(uvm.y)), vec2(du.y, dFdy(uvm.y))); diffuseColor *= sampledDiffuseColor;`);
+      vec4 sampledDiffuseColor = textureGrad(map, uvm, vec2(du.x, dFdx(uvm.y)), vec2(du.y, dFdy(uvm.y))); diffuseColor *= sampledDiffuseColor;
+      // fine surface variation below the map's ~2.7 km pixels, faded in only up close: VISUAL DETAIL, NOT DATA
+      float near = 1.0 - smoothstep(4.0e5, 1.5e6, length(vMoonW - cameraPosition));
+      vec3 pd = vMoonP / 2500.0; float dn = mn(pd) * 0.5 + mn(pd * 3.1) * 0.3 + mn(pd * 9.7) * 0.2;
+      diffuseColor.rgb *= mix(1.0, 0.82 + 0.36 * dn, near);`);
   };
   return m;
 }
@@ -170,11 +189,21 @@ const toScene = (x, y, h) => new THREE.Vector3(x, h, -y); // tile frame (x east,
 function groundNormal(x, y) { const e = 3, dx = (groundY(x + e, y) - groundY(x - e, y)) / (2 * e), dy = (groundY(x, y + e) - groundY(x, y - e)) / (2 * e); return new THREE.Vector3(-dx, 1, dy).normalize(); }
 
 const marks = []; let trail, descentLine;
+function detailNormals(size = 512) { // tileable fine regolith bumps as a normal map: VISUAL DETAIL, NOT DATA
+  const h = new Float32Array(size * size), rnd = (i) => { const x = Math.sin(i * 12.9898) * 43758.5453; return x - Math.floor(x); };
+  for (let o = 0; o < 4; o++) { const cell = size >> (o + 2), amp = 1 / (o + 1); for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) { const cx = Math.floor(x / cell), cy = Math.floor(y / cell), n = (size / cell) | 0,
+    fx = x / cell - cx, fy = y / cell - cy, g = (a, b) => rnd(((a % n) + n) % n + (((b % n) + n) % n) * 131 + o * 977), s = (t) => t * t * (3 - 2 * t);
+    h[y * size + x] += amp * ((g(cx, cy) * (1 - s(fx)) + g(cx + 1, cy) * s(fx)) * (1 - s(fy)) + (g(cx, cy + 1) * (1 - s(fx)) + g(cx + 1, cy + 1) * s(fx)) * s(fy)); } }
+  const d = new Uint8Array(size * size * 4); for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) { const at = (a, b) => h[((b + size) % size) * size + ((a + size) % size)], dx = (at(x + 1, y) - at(x - 1, y)) * 2.2, dy = (at(x, y + 1) - at(x, y - 1)) * 2.2, l = Math.hypot(dx, dy, 1), k = (y * size + x) * 4;
+    d[k] = (-dx / l * 0.5 + 0.5) * 255; d[k + 1] = (-dy / l * 0.5 + 0.5) * 255; d[k + 2] = (1 / l * 0.5 + 0.5) * 255; d[k + 3] = 255; }
+  const t = new THREE.DataTexture(d, size, size); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter; t.anisotropy = 16; t.needsUpdate = true; return t;
+}
 function buildSurface() {
   const R = W.rows, C = W.cols, td = DS.last; hRef = 0; hRef = heightAt(td.x, td.y);
   const photo = tex(`${BASE}assets/site01/photo_1m.jpg`), ctxPhoto = tex(`${BASE}assets/site01/photo_ctx_2m.jpg`);
   const geo = gridGeometry(R, C, (r, c) => [c * W.mpp - W.half_x, W.height[r * C + c] - hRef, r * W.mpp - W.half_y], (r, c) => [c / (C - 1), 1 - r / (R - 1)]);
-  const terrain = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: photo, color: new THREE.Color(1.7, 1.7, 1.75), roughness: 1, metalness: 0 })); terrain.receiveShadow = true; surf.add(terrain);
+  const nm = detailNormals(); nm.repeat.set(160, 160); nm.channel = 1; geo.setAttribute('uv1', geo.attributes.uv.clone()); // detail tiles 160x across the tile (about 16 m per repeat)
+  const terrain = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: photo, normalMap: nm, normalScale: new THREE.Vector2(0.55, 0.55), color: new THREE.Color(1.7, 1.7, 1.75), roughness: 1, metalness: 0 })); terrain.receiveShadow = true; surf.add(terrain);
   if (W.context) { const X = W.context, n = X.rows, m = X.cols, H = b64f32(X.height_f32), x0 = X.offset_x_m - (m - 1) / 2 * X.mpp, y0 = X.offset_y_m + (n - 1) / 2 * X.mpp, HALF = 2560;
     const inside = (r, c) => { const xa = x0 + c * X.mpp, ya = y0 - r * X.mpp; return xa > -W.half_x + 25 && xa + X.mpp < W.half_x - 25 && ya < W.half_y - 25 && ya - X.mpp > -W.half_y + 25; };
     const cg = gridGeometry(n, m, (r, c) => [x0 + c * X.mpp, H[r * m + c] - hRef - 0.6, -(y0 - r * X.mpp)], (r, c) => [clamp((x0 + c * X.mpp + HALF) / (2 * HALF), 0, 1), clamp((y0 - r * X.mpp + HALF) / (2 * HALF), 0, 1)], inside);
@@ -317,7 +346,7 @@ function updateGhosts(c, u, sim, dt, wall) {
 // ------------------------------------------------------------------------------------------------ title card and timeline
 function hud(c) {
   const tin = S.T - c.T0, op = smooth(clamp((tin - 0.4) / 1.0, 0, 1)) * smooth(clamp((6.5 - tin) / 1.2, 0, 1));
-  if ($('title-h').textContent !== c.title) { $('title-h').textContent = c.title; $('title-p').textContent = c.text; } $('title').style.opacity = String(op);
+  if ($('title-h').textContent !== c.title) { $('title-h').textContent = c.title; $('title-p').textContent = c.text; $('title-i').textContent = `${String(CH.indexOf(c) + 1).padStart(2, '0')} / ${String(CH.length).padStart(2, '0')}`; } $('title').style.opacity = String(op); $('title').style.transform = `translateY(${(1 - op) * 10}px)`;
   $('seek').value = String(Math.round(S.T / S.total * 1000)); const s = Math.floor(S.T); $('clock').textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 }
 
@@ -343,7 +372,7 @@ function tick(now) {
     stepFade(dt); applyCamera(); if (S.cam === 'free') controls.update(); hud(c); drawLabels(active);
     if (Q.get('debug')) document.title = JSON.stringify({ ch: c.id, u: +u.toFixed(3), cam: camera.position.toArray().map((v) => +v.toFixed(1)), fade: +fade.a.toFixed(2) });
   }
-  if (renderPass.scene) composer.render(); else renderer.clear();
+  grade.uniforms.uTime.value = wall; if (renderPass.scene) composer.render(); else renderer.clear();
 }
 
 // ------------------------------------------------------------------------------------------------ controls (auto-hide like a video player)
