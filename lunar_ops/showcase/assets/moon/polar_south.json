@@ -1,0 +1,8 @@
+{
+ "image": "polar_south_wac.jpg",
+ "half_m": 612744.8896254691,
+ "projection": "polar stereographic, centred on the south pole, x = rho sin(lon), y = rho cos(lon), R = 1737400 m",
+ "source": "LROC WAC south-pole summer mosaic WAC_ROI_SOUTH_SUMMER_128P (8-bit browse GeoTIFF), cropped to 70-90 deg S and resampled to 5120 px",
+ "credit": "NASA/GSFC/Arizona State University; Speyerer et al. (2020) LSSW abstract 5132",
+ "provenance": "observed"
+}
