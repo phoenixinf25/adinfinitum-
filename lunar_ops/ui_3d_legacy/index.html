@@ -1,0 +1,109 @@
+<!doctype html>
+<!--
+  Copyright (c) 2026, Adinfinitium team
+  Permission to use, copy, modify, and/or distribute this software for any
+  purpose with or without fee is hereby granted, provided that the above
+  copyright notice and this permission notice appear in all copies.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Adinfinitium · Lunar Mission Control</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three.module.js" } }
+  </script>
+</head>
+<body>
+<div id="app">
+  <nav id="menubar">
+    <div id="menus"></div>
+    <div class="spacer"></div>
+    <ol id="ribbon">
+      <li data-p="ORBIT">ORBIT</li><li data-p="DEORBIT">DEORBIT</li><li data-p="DESCENT">DESCENT</li>
+      <li data-p="LANDED">LANDED</li><li data-p="ROVER OPS">ROVER OPS</li>
+    </ol>
+    <div id="control" class="badge">CONTROL · —</div>
+    <div id="conn" class="badge off">● OFFLINE</div>
+  </nav>
+  <div id="banner"></div>
+
+  <div id="view">
+    <canvas id="gl"></canvas>
+    <div id="camlabel"></div>
+
+    <section class="widget" id="w-mission" data-title="Mission">
+      <div class="kv">
+        <div><small>Mission elapsed</small><b id="met">T+ 00d 00:00:00</b></div>
+        <div><small>Phase</small><b id="phase">—</b></div>
+      </div>
+      <ol id="timeline"></ol>
+    </section>
+
+    <section class="widget" id="w-vehicle" data-title="Vehicle">
+      <div class="kv two" id="vehicle"></div>
+    </section>
+
+    <section class="widget" id="w-power" data-title="Power · rover">
+      <div class="bigrow"><span id="batpct" class="big">—</span><span id="batwh" class="dim">— Wh</span></div>
+      <div class="bar"><i id="batbar"></i></div>
+      <canvas id="spark" width="280" height="46"></canvas>
+      <div class="kv three">
+        <div><small>Solar</small><b id="solar">—</b></div>
+        <div><small>Load</small><b id="load">—</b></div>
+        <div><small>Net</small><b id="net">—</b></div>
+      </div>
+    </section>
+
+    <section class="widget" id="w-engines" data-title="Lander engines">
+      <div id="engines"></div>
+      <div class="kv three">
+        <div><small>Thrust</small><b id="thr">—</b></div>
+        <div><small>Fuel</small><b id="fuel">—</b></div>
+        <div><small>Engines</small><b id="engok">—</b></div>
+      </div>
+    </section>
+
+    <section class="widget" id="w-sites" data-title="Ice-evidence sites">
+      <ul id="sites"></ul>
+    </section>
+
+    <section class="widget" id="w-stack" data-title="AI stack">
+      <ul id="models"></ul>
+    </section>
+
+    <section class="widget" id="w-map" data-title="Map · north up">
+      <canvas id="mini" width="300" height="300"></canvas>
+    </section>
+
+    <section class="widget" id="w-cam" data-title="Rover camera">
+      <div id="camslot"><span id="camhud"></span></div>
+    </section>
+
+    <section class="widget" id="w-log" data-title="Autonomy decision log · facts only: what / when / why">
+      <ol id="log"></ol>
+    </section>
+
+    <div id="legend"></div>
+    <div id="notice" hidden></div>
+  </div>
+
+  <div id="scrub">
+    <button id="play" title="Play / pause (space)">❚❚</button>
+    <button id="step-back" title="Slower">−</button>
+    <input id="seek" type="range" min="0" max="1000" value="0" step="1">
+    <button id="step-fwd" title="Faster">+</button>
+    <div id="simtime"><small>Sim time elapsed</small><b id="simclock">00:00:00:00.0</b></div>
+    <div id="speedlab">1×</div>
+    <div id="state">PAUSED</div>
+    <label class="tgl" title="Take manual control: W/S speed, A/D turn (live backend only)">
+      <input type="checkbox" id="override"> Manual
+    </label>
+    <button id="abort" title="Latch safe mode (live backend only)">ABORT</button>
+  </div>
+</div>
+<input type="file" id="filepick" accept=".jsonl,.json" hidden>
+<script type="module" src="app.js"></script>
+</body>
+</html>

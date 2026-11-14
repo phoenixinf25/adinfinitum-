@@ -1,0 +1,68 @@
+<!doctype html>
+<!--
+  Copyright (c) 2026, Adinfinitium team
+
+  Permission to use, copy, modify, and/or distribute this software for any
+  purpose with or without fee is hereby granted, provided that the above
+  copyright notice and this permission notice appear in all copies.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Adinfinitium · Mission Control</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header id="hdr">
+    <span class="title">Adinfinitium</span>
+    <ol id="phases">
+      <li data-p="ORBIT">Orbit</li><li data-p="DEORBIT">Deorbit</li><li data-p="DESCENT">Descent</li>
+      <li data-p="LANDED">Landed</li><li data-p="ROVER OPS">Rover ops</li>
+    </ol>
+    <span class="status"><span id="control">—</span><span id="conn" class="off">● Offline</span></span>
+  </header>
+  <div id="banner"></div>
+
+  <main id="main">
+    <section class="col" id="left">
+      <h4>Decision log <span id="logcount"></span></h4>
+      <ol id="log"></ol>
+    </section>
+
+    <section id="center">
+      <div id="mapwrap">
+        <div class="maphead"><span id="site">—</span><span id="maplayers"></span></div>
+        <canvas id="map"></canvas><div id="maptip"></div><div id="mapkey"></div>
+      </div>
+      <div id="readouts"></div>
+    </section>
+
+    <section class="col" id="right">
+      <div class="block grow2"><h4 id="ctxtitle">—</h4><div class="plot"><canvas id="ctx"></canvas></div><div id="ctxextra"></div></div>
+      <div class="block"><h4>Sun and Earth</h4><div class="plot short"><canvas id="sky"></canvas></div></div>
+      <div class="block"><h4 id="icetitle">Ice evidence</h4><div id="ice"></div></div>
+      <div class="block"><h4>AI stack</h4><div id="ai"></div><div class="plot tiny" id="trainwrap" hidden><canvas id="train"></canvas></div></div>
+    </section>
+  </main>
+
+  <footer id="scrub">
+    <button id="play" title="Play / pause (space)">❚❚</button>
+    <button id="slower" title="Slower">−</button>
+    <input id="seek" type="range" min="0" max="1000" value="0" step="1">
+    <button id="faster" title="Faster">+</button>
+    <span id="simclock">00:00:00:00.0</span>
+    <span id="speedlab">1×</span>
+    <span id="state">Paused</span>
+    <span class="spacer"></span>
+    <label class="manual"><input type="checkbox" id="override"> Manual (W A D)</label>
+    <button id="openfile" title="Open a recorded .jsonl run">Open run</button>
+    <button id="abort" title="Latch safe mode (live backend only)">Abort</button>
+  </footer>
+</div>
+<div id="notice" hidden></div>
+<input type="file" id="filepick" accept=".jsonl,.json" hidden>
+<script src="app.js"></script>
+</body>
+</html>

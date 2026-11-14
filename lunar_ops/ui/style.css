@@ -1,0 +1,72 @@
+/* Copyright (c) 2026, Adinfinitium team. ISC-style permission notice as in index.html. */
+/* Palette: midnight black, electric blue, cantaloupe orange. Blue = normal state and data. Cantaloupe = needs attention. */
+:root {
+  --black: #02040a; --panel: #070b14; --line: #121b2c;
+  --text: #dbe6f5; --dim: #6b7d96;
+  --blue: #2f7dff; --blue-d: #14357a; --blue-l: #8db9ff;
+  --cantaloupe: #ffa566; --cantaloupe-d: #5e3a1f;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--black); color: var(--text); font: 12px/1.4 var(--mono); overflow: hidden; }
+#app { display: grid; grid-template-rows: 34px 20px minmax(0, 1fr) 40px; height: 100vh; min-width: 1100px; }
+button { font: inherit; color: var(--text); background: none; border: 1px solid var(--line); border-radius: 3px; padding: 3px 11px; cursor: pointer; }
+button:hover { border-color: var(--blue-d); color: var(--blue-l); } button:disabled { opacity: .35; cursor: not-allowed; }
+.spacer { flex: 1; } .dim { color: var(--dim); } .blue { color: var(--blue); } .cantaloupe { color: var(--cantaloupe); }
+
+#hdr { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--line); }
+.title { color: var(--blue); letter-spacing: .22em; text-transform: uppercase; font-size: 12px; }
+#phases { display: flex; list-style: none; margin: 0; padding: 0; gap: 22px; }
+#phases li { color: var(--dim); padding: 7px 0; border-bottom: 2px solid transparent; }
+#phases li.done { color: var(--text); } #phases li.on { color: var(--blue); border-bottom-color: var(--blue); }
+.status { justify-self: end; display: flex; gap: 18px; }
+#control { color: var(--blue-l); } #control.safe { color: var(--cantaloupe); }
+#conn.live { color: var(--blue); } #conn.replay { color: var(--blue-l); } #conn.off { color: var(--cantaloupe); }
+#banner { color: var(--dim); padding: 3px 16px; font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#banner b { color: var(--cantaloupe); font-weight: 400; letter-spacing: .08em; margin-right: 10px; }
+
+#main { display: grid; grid-template-columns: 300px minmax(0, 1fr) 360px; gap: 10px; padding: 6px 10px 8px; min-height: 0; }
+h4 { margin: 0 0 6px; font-size: 10px; font-weight: 400; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); display: flex; justify-content: space-between; }
+.col, .block { background: var(--panel); border-radius: 4px; padding: 10px 12px; min-height: 0; min-width: 0; overflow: hidden; display: flex; flex-direction: column; }
+#right { background: none; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.block { flex: 0 0 auto; } .block.grow2 { flex: 1 1 0; }
+
+#log { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+#log li { display: grid; grid-template-columns: 58px 1fr; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--line); }
+#log time { color: var(--dim); } #log li.agent .m { color: var(--blue-l); } #log li.alert .m { color: var(--cantaloupe); }
+#log .k { display: none; }
+
+#center { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 10px; min-height: 0; min-width: 0; }
+#mapwrap { position: relative; background: var(--panel); border-radius: 4px; min-height: 0; overflow: hidden; }
+.maphead { position: absolute; left: 12px; right: 12px; top: 8px; display: flex; justify-content: space-between; z-index: 2; color: var(--dim); font-size: 10.5px; letter-spacing: .06em; }
+#maplayers button { border: 0; padding: 0 0 2px; margin-left: 14px; border-radius: 0; color: var(--dim); text-transform: uppercase; letter-spacing: .1em; font-size: 10px; }
+#maplayers button.on { color: var(--blue); border-bottom: 1px solid var(--blue); }
+canvas { display: block; width: 100%; height: 100%; }
+#maptip, #mapkey { position: absolute; z-index: 2; font-size: 10.5px; color: var(--dim); pointer-events: none; }
+#maptip { left: 12px; bottom: 8px; } #mapkey { right: 12px; bottom: 8px; }
+
+#readouts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.ro { background: var(--panel); border-radius: 4px; padding: 10px 14px; }
+.ro small { display: block; color: var(--dim); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
+.ro b { display: block; font-weight: 400; font-size: 26px; line-height: 1.15; color: var(--text); white-space: nowrap; }
+.ro i { font-style: normal; color: var(--dim); font-size: 10.5px; }
+.ro .blue { color: var(--blue); } .ro .cantaloupe { color: var(--cantaloupe); }
+
+.plot { position: relative; flex: 1; min-height: 120px; } .plot.short { flex: none; height: 118px; min-height: 0; } .plot.tiny { flex: none; height: 56px; min-height: 0; margin-top: 6px; }
+.plot canvas { position: absolute; inset: 0; }
+.eng { display: flex; gap: 6px; align-items: flex-end; height: 44px; margin-top: 8px; }
+.eng div { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; text-align: center; color: var(--dim); font-size: 10px; }
+.eng i { display: block; background: var(--blue-d); border-top: 2px solid var(--blue); } .eng .off i { background: var(--cantaloupe-d); border-top-color: var(--cantaloupe); }
+
+.row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+.meter { display: inline-block; width: 54px; height: 3px; background: var(--line); vertical-align: middle; margin: 0 6px; } .meter i { display: block; height: 100%; background: var(--blue-d); }
+.st.done { color: var(--blue); } .st.active { color: var(--blue-l); } .st.open { color: var(--dim); } .st.fallback { color: var(--blue-l); } .st.attached { color: var(--blue); } .st.none { color: var(--dim); } .st.alert { color: var(--cantaloupe); }
+.note { color: var(--dim); font-size: 10.5px; margin-top: 4px; }
+
+#scrub { display: flex; align-items: center; gap: 12px; padding: 0 16px; border-top: 1px solid var(--line); }
+#seek { flex: 0 1 460px; width: 460px; accent-color: var(--blue); }
+#simclock { color: var(--text); font-size: 14px; } #speedlab, #state { color: var(--dim); min-width: 44px; }
+#state.playing { color: var(--blue); } .manual { color: var(--dim); }
+#abort { border-color: var(--cantaloupe); color: var(--cantaloupe); } #abort:hover { background: var(--cantaloupe); color: var(--black); }
+#notice { position: fixed; left: 50%; top: 40%; transform: translateX(-50%); background: var(--panel); border: 1px solid var(--line); padding: 18px 26px; max-width: 520px; z-index: 10; line-height: 1.6; }
+#notice[hidden], #trainwrap[hidden] { display: none; } #notice code { color: var(--blue); }
