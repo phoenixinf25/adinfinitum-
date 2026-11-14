@@ -20,7 +20,7 @@ oui('ouiThermal', 'Temperatures', 'simulated', (p) => { const n = 14, i1 = MC.cu
 oui('ouiEnergy', 'Energy by subsystem', 'simulated split', (p) => { const s = span('load'); if (!s) return wait('Rover energy appears after landing.'); const n = 8, c = MC.cols, L = labels(s[0], s[1], n), cats = Object.keys(MC.SPLIT.drive), acc = cats.map(() => new Array(n).fill(0)), step = (s[1] - s[0] + 1) / n;
   for (let i = s[0]; i <= s[1]; i++) { const k = Math.min(n - 1, Math.floor((i - s[0]) / step)), dt = i ? Math.max(0, c.t[i] - c.t[i - 1]) : 0, sp = MC.SPLIT[MC.MODES[c.mode[i]] || 'hold']; if (!Number.isFinite(c.load[i])) continue; cats.forEach((nm, j) => { acc[j][k] += c.load[i] * sp[nm] * dt / 3600; }); }
   return `root = Card([c])\nc = BarChart(${strs(L)}, [${cats.map((_, j) => 's' + j).join(', ')}], "stacked", "time since landing (h:min)", "Wh", ${ch(p)})\n${cats.map((nm, j) => `s${j} = Series(${q(nm + ' Wh')}, ${arr(acc[j])})`).join('\n')}`; });
-oui('ouiSplit', 'Where the power goes now', 'simulated split', () => { const load = MC.at('load'); if (!Number.isFinite(load)) return wait('Rover power appears after landing.'); const sp = MC.SPLIT[MC.MODES[MC.at('mode')] || 'hold'], cats = Object.keys(sp).filter((k) => sp[k] > 0); return `root = Card([c])\nc = PieChart(${strs(cats)}, ${arr(cats.map((k) => load * sp[k]))}, "donut")`; });
+oui('ouiSplit', 'Power split now', 'simulated split', () => { const load = MC.at('load'); if (!Number.isFinite(load)) return wait('Rover power appears after landing.'); const sp = MC.SPLIT[MC.MODES[MC.at('mode')] || 'hold'], cats = Object.keys(sp).filter((k) => sp[k] > 0); return `root = Card([c])\nc = PieChart(${strs(cats)}, ${arr(cats.map((k) => load * sp[k]))}, "donut")`; });
 oui('ouiRadar', 'Health check (100 = best)', 'derived', () => { if (!Number.isFinite(MC.at('soc'))) return wait('Health check appears after landing.'); const L = lim(), lk = MC.link(), tb = MC.sim.temp.battery[MC.cur];
   const names = ['Battery', 'Solar input', 'Earth link', 'Thermal margin', 'Slope margin', 'Hazard margin'], vals = [MC.at('soc') * 100, MC.at('solar') / L.solar_peak_w * 100, lk.margin / 14 * 100, (tb + 10) / 40 * 100, (1 - MC.at('slope') / L.slope_limit_deg) * 100, (1 - MC.at('haz')) * 100].map((v) => Math.max(0, Math.min(100, v)));
   return `root = Card([c])\nc = RadarChart(${strs(names)}, [s])\ns = Series("Health", ${arr(vals)})`; });
@@ -33,6 +33,14 @@ oui('ouiLander', 'Descent altitude', 'feed', (p) => { const s = span('alt'); if 
 oui('ouiEngines', 'Engine throttle', 'feed', () => { const eng = MC.lastFinite('eng'), th = MC.lastFinite('thrust'); if (!Number.isFinite(eng)) return wait('Engines appear during the landing.'); const per = th / Math.max(eng, 1) / 800 * 100, v = [0, 1, 2, 3, 4].map((i) => (eng < 5 && [1, 3].includes(i) ? 0 : per)); return `root = Card([c])\nc = RadialChart(["E1","E2","E3","E4","E5"], ${arr(v)})`; });
 oui('ouiTime', 'Time in each activity', 'derived', () => { const c = MC.cols, cnt = [0, 0, 0, 0]; for (let i = 0; i <= MC.cur; i++) if (c.mode[i] >= 0) cnt[c.mode[i]]++; if (cnt.every((v) => v === 0)) return wait('Activity appears after landing.'); return `root = Card([c])\nc = SingleStackedBarChart(["Driving","Waiting","Sleeping","Drilling"], ${arr(cnt)})`; });
 
+// A short notice built from OpenUI's Callout component; it slides in with OpenUI's animation and fades out with OpenUI's callout fade.
+MC.toast = function (variant, title, desc) {
+  const O = window.__OpenUI, host = document.getElementById('toasts'); if (!O || !host) return;
+  const el = document.createElement('div'); el.className = 'toast'; host.appendChild(el); const root = O.createRoot(el);
+  root.render(O.React.createElement(O.Renderer, { response: `root = Card([c])\nc = Callout(${q(variant)}, ${q(title)}, ${q(desc)})`, library: O.openuiChatLibrary }));
+  setTimeout(() => { el.classList.add('out'); setTimeout(() => { try { root.unmount(); } catch (e) { /* already gone */ } el.remove(); }, 700); }, 4600);
+  while (host.children.length > 4) host.firstChild.remove();
+};
 // Render one OpenUI panel; called by the app loop. Re-renders only when the Lang text changed, so the chart animates between states.
 MC.ouiRender = function (p, now) {
   const O = window.__OpenUI; if (!O) { if (!p.msgd) { p.el.innerHTML = '<div class="msg">Loading chart library…</div>'; p.msgd = true; } return; }

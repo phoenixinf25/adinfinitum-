@@ -5,16 +5,34 @@
 const MC = (window.MC = window.MC || {});
 
 MC.C = { bg: '#060a13', blue: '#2f7dff', blueL: '#8db9ff', blueD: '#14357a', blueDD: '#0b1a3a', orange: '#ffa566', orangeD: '#5e3a1f', dim: '#6f7f9c', text: '#cfd9ee', grid: '#101a2e', white: '#ffffff' };
-const C = MC.C, MONO = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', SANS = '-apple-system, "Segoe UI", Helvetica, Arial, sans-serif';
+const C = MC.C, MONO = '"JetBrains Mono", ui-monospace, Menlo, Consolas, monospace', SANS = '"Instrument Sans", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif';
+// No sharp corners: every rectangle drawn on any chart canvas gets rounded ends (tiny rectangles become round-ended lines).
+(function () {
+  const P = CanvasRenderingContext2D.prototype; if (!P.roundRect || P.__soft) return; P.__soft = true; const fr = P.fillRect, sr = P.strokeRect;
+  const shape = (x, y, w, h) => { if (w < 0) { x += w; w = -w; } if (h < 0) { y += h; h = -h; } const p = new Path2D(); p.roundRect(x, y, w, h, Math.min(9, w / 2, h / 2)); return p; };
+  P.fillRect = function (x, y, w, h) { if (!w || !h) return; if (x <= 0 && y <= 0 && w >= this.canvas.clientWidth - 1 && h >= this.canvas.clientHeight - 1) return fr.call(this, x, y, w, h); this.fill(shape(x, y, w, h)); };
+  P.strokeRect = function (x, y, w, h) { if (!w || !h) return; this.stroke(shape(x, y, w, h)); };
+})();
+// Numbers get the monospace font, everything else the sans font. Splits a string into [text, isNumber] parts.
+MC.splitNum = function (t) {
+  const re = /\d[\d.,:]*\d|\d/g, out = []; let last = 0, m; t = String(t);
+  while ((m = re.exec(t))) { let s = m.index; const e = s + m[0].length, prev = t[s - 1]; if (prev && /[A-Za-z_]/.test(prev)) continue; if ((prev === '-' || prev === '−') && (s === 1 || /[\s(\[]/.test(t[s - 2]))) s--; if (s > last) out.push([t.slice(last, s), 0]); out.push([t.slice(s, e), 1]); last = e; }
+  if (last < t.length) out.push([t.slice(last), 0]); return out;
+};
 
 MC.clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 MC.fit = function (c) {
   const cw = c.clientWidth, ch = c.clientHeight; if (!cw || !ch) return null;
   const dpr = window.devicePixelRatio || 1, w = Math.round(cw * dpr), h = Math.round(ch * dpr);
   if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
-  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.fillStyle = C.bg; g.fillRect(0, 0, cw, ch); return { g, w: cw, h: ch };
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.lineJoin = 'round'; g.lineCap = 'round'; g.fillStyle = C.bg; g.fillRect(0, 0, cw, ch); return { g, w: cw, h: ch };
 };
-MC.txt = function (g, t, x, y, col = C.dim, align = 'left', size = 10, mono = false) { g.fillStyle = col; g.font = `${size}px ${mono ? MONO : SANS}`; g.textAlign = align; g.textBaseline = 'alphabetic'; g.fillText(t, x, y); };
+const fontOf = (size, num) => (num ? `500 ${(size * 0.94).toFixed(1)}px ${MONO}` : `${size}px ${SANS}`);
+MC.txtWidth = function (g, t, size = 10) { let w = 0; for (const [s, n] of MC.splitNum(t)) { g.font = fontOf(size, n); w += g.measureText(s).width; } return w; };
+MC.txt = function (g, t, x, y, col = C.dim, align = 'left', size = 10) {
+  const parts = MC.splitNum(t); g.fillStyle = col; g.textBaseline = 'alphabetic'; g.textAlign = 'left'; const ws = parts.map(([s, n]) => { g.font = fontOf(size, n); return g.measureText(s).width; }), total = ws.reduce((a, b) => a + b, 0);
+  let cx = align === 'right' ? x - total : align === 'center' ? x - total / 2 : x; parts.forEach(([s, n], i) => { g.font = fontOf(size, n); g.fillText(s, cx, y); cx += ws[i]; });
+};
 MC.empty = (g, w, h, msg) => MC.txt(g, msg, w / 2, h / 2, C.dim, 'center', 12);
 const HEAT = [[8, 14, 32], [18, 46, 108], [47, 125, 255], [141, 185, 255]];
 MC.heatRGB = function (v) { v = MC.clamp(v, 0, 1) * 3; const i = Math.min(2, Math.floor(v)), f = v - i, a = HEAT[i], b = HEAT[i + 1]; return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]; };

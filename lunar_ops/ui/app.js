@@ -16,7 +16,7 @@ const S = (MC.S = {
 
 // ---------------------------------------------------------------- workbook layouts: [panel, col1, col2, row1, row2] on a 12 x 12 grid
 const LAYOUTS = {
-  wall: ['Wall', [['gps', 1, 4, 1, 8], ['traces', 5, 9, 1, 8], ['targets', 10, 12, 1, 5], ['gauges', 10, 12, 6, 8], ['status', 1, 3, 9, 12], ['gantt', 4, 9, 9, 10], ['runtl', 4, 9, 11, 12], ['log', 10, 12, 9, 12]]],
+  wall: ['Wall', [['gps', 1, 4, 1, 7], ['traces', 5, 9, 1, 7], ['targets', 10, 12, 1, 5], ['gauges', 10, 12, 6, 7], ['status', 1, 3, 8, 12], ['gantt', 4, 9, 8, 9], ['runtl', 4, 9, 10, 12], ['log', 10, 12, 8, 12]]],
   imagery: ['Imagery', [['imagery', 1, 8, 1, 12], ['locate', 9, 12, 1, 6], ['sitemini', 9, 12, 7, 9], ['track', 9, 12, 10, 12]]],
   charts: ['Charts', [['ouiPower', 1, 4, 1, 4], ['ouiBattery', 5, 8, 1, 4], ['ouiSplit', 9, 10, 1, 4], ['ouiRadar', 11, 12, 1, 4], ['ouiThermal', 1, 4, 5, 8], ['ouiEnergy', 5, 8, 5, 8], ['ouiLander', 9, 12, 5, 8], ['ouiTargets', 1, 4, 9, 12], ['ouiScatter', 5, 8, 9, 12], ['ouiEngines', 9, 10, 9, 12], ['ouiTime', 11, 12, 9, 12]]],
   landing: ['Landing', [['orbit', 1, 4, 1, 5], ['orbtr', 5, 8, 1, 5], ['engines', 9, 12, 1, 5], ['desctr', 1, 8, 6, 12], ['gauges', 9, 12, 6, 9], ['log', 9, 12, 10, 12]]],
@@ -25,16 +25,16 @@ const LAYOUTS = {
   comms: ['Comms · Sky', [['link', 1, 4, 1, 6], ['sky', 5, 8, 1, 6], ['skytr', 9, 12, 1, 6], ['gantt', 1, 12, 7, 9], ['env', 1, 6, 10, 12], ['stats', 7, 12, 10, 12]]],
   terrain: ['Terrain · Ice', [['map', 1, 6, 1, 9], ['targets', 7, 12, 1, 6], ['hist', 7, 12, 7, 9], ['profile', 1, 6, 10, 12], ['scatter', 7, 12, 10, 12]]],
   ai: ['AI · Systems', [['ai', 1, 6, 1, 5], ['policy', 7, 12, 1, 5], ['train', 1, 6, 6, 9], ['status', 7, 12, 6, 9], ['prov', 1, 6, 10, 12], ['log', 7, 12, 10, 12]]],
-  ghosts: ['Ghosts', [['ghostmap', 1, 7, 1, 8], ['ghostctl', 1, 7, 9, 9], ['ghostz', 1, 7, 10, 12], ['ghostruns', 8, 12, 1, 6], ['ghostdrop', 8, 12, 7, 12]]],
+  ghosts: ['Ghosts', [['ghostmap', 1, 7, 1, 8], ['ghostctl', 1, 7, 9, 10], ['ghostz', 1, 7, 11, 12], ['ghostruns', 8, 12, 1, 6], ['ghostdrop', 8, 12, 7, 12]]],
   log: ['Log', [['log', 1, 12, 1, 12]]],
 };
 let live = []; // panel instances on screen
 MC.showTab = function (name) {
   if (!LAYOUTS[name]) name = 'wall'; S.tab = name; const wb = $('wb'); for (const p of live) { try { p.root?.unmount(); } catch (e) { /* already gone */ } } wb.innerHTML = ''; live = [];
   for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.tab === name);
-  for (const [id, c1, c2, r1, r2] of LAYOUTS[name][1]) {
+  let order = 0; for (const [id, c1, c2, r1, r2] of LAYOUTS[name][1]) {
     const def = MC.panels[id]; if (!def) { console.error('missing panel', id); continue; }
-    const sec = document.createElement('section'); sec.className = 'pn'; sec.style.gridArea = `${r1} / ${c1} / ${r2 + 1} / ${c2 + 1}`;
+    const sec = document.createElement('section'); sec.className = 'pn'; sec.style.setProperty('--i', String(order++)); sec.style.gridArea = `${r1} / ${c1} / ${r2 + 1} / ${c2 + 1}`;
     sec.innerHTML = `<h3><span class="t">${def.title}</span><span class="ctl"></span><em>${def.src || ''}</em></h3><div class="pb ${def.dom ? 'dom' : ''} ${def.oui ? 'oui' : ''}">${def.canvas ? '<canvas></canvas>' : ''}</div>`;
     const pb = sec.querySelector('.pb'), p = { id, def, el: pb, canvas: pb.querySelector('canvas'), sel: def.ctl?.def, last: null };
     if (def.ctl) { const host = sec.querySelector('.ctl'); for (const [val, lab] of def.ctl.options) { const b = document.createElement('button'); b.textContent = lab; b.className = val === p.sel ? 'on' : ''; b.onclick = () => { p.sel = val; for (const x of host.children) x.className = x === b ? 'on' : ''; def.ctl.onSel?.(val); S.dirty = true; }; host.appendChild(b); } if (def.ctl.def && def.ctl.onSel) def.ctl.onSel(def.ctl.def); }
@@ -48,7 +48,7 @@ function renderPanels(now, force) {
     try {
       if (p.def.oui) { MC.ouiRender(p, now); continue; }
       if (p.canvas) { const fc = MC.fit(p.canvas); if (fc) p.def.draw(fc.g, fc.w, fc.h, p); }
-      else { if (p.def.html && (force || now - (p.t || 0) > 250)) { p.t = now; const h = p.def.html(p); if (h !== p.last) { p.el.innerHTML = h; p.last = h; MC.nfHydrate(p.el, p.id); } } p.def.update?.(p.el, p); }
+      else { if (p.def.html && (force || now - (p.t || 0) > 250)) { p.t = now; const h = p.def.html(p); if (h !== p.last) { p.el.innerHTML = h; p.last = h; MC.nfHydrate(p.el, p.id); MC.numify(p.el); } } if (p.def.update) { p.def.update(p.el, p); MC.numify(p.el); } }
     } catch (e) { if (!p.err) { console.error(p.id, e); p.err = true; } if (p.canvas) { const fc = MC.fit(p.canvas); if (fc) MC.txt(fc.g, `panel error: ${e.message}`, 10, 20, C.orange, 'left', 11); } }
   }
 }
@@ -102,8 +102,17 @@ function renderTop(f) {
 }
 
 // ---------------------------------------------------------------- frames and data sources
+function notify(prev, f) {
+  if (!prev || S.seeking || !MC.toast) return; const n = MC.PH.indexOf(f.mission_phase || 'ROVER OPS');
+  if ((prev.mission_phase || 'ROVER OPS') !== (f.mission_phase || 'ROVER OPS')) MC.toast('info', `Step ${n + 1} of 5: ${MC.PH_NAME[n]}`, { ORBIT: 'Circling the Moon.', DEORBIT: 'Lowering the orbit towards the landing site.', DESCENT: 'Powered descent has started.', LANDED: 'The lander has touched down.', 'ROVER OPS': 'The rover has rolled out and is working.' }[MC.PH[n]]);
+  if (prev.battery_frac >= 0.25 && f.battery_frac < 0.25) MC.toast('warning', 'Battery low', `${Math.round(f.battery_frac * 100)} % left, below the 25 % warning line.`);
+  if (prev.lander && f.lander && f.lander.engines_ok < prev.lander.engines_ok) MC.toast('error', 'Engine failure', `${f.lander.engines_ok} of 5 engines working. The lander is rebalancing.`);
+  if (!prev.aborted && f.aborted) MC.toast('error', 'Safe mode', 'The rover has stopped and is keeping itself safe.');
+  if (prev.earth_visible !== undefined && f.earth_visible !== undefined && prev.earth_visible !== f.earth_visible) MC.toast(f.earth_visible ? 'info' : 'warning', f.earth_visible ? 'Earth link up' : 'Earth link lost', f.earth_visible ? 'The rover can talk to Earth.' : 'Earth is below the horizon.');
+  const ds = (x) => (x.targets || []).filter((t) => t.sampled).length; if (ds(f) > ds(prev)) MC.toast('success', 'Sample taken', 'An ice target was sampled (evidence, not confirmation).');
+}
 function applyFrame(f, light = false) {
-  S.last = f; S.phaseNow = f.mission_phase || 'ROVER OPS'; S.dirty = true; S.domDirty = true;
+  notify(S.last, f); S.last = f; S.phaseNow = f.mission_phase || 'ROVER OPS'; S.dirty = true; S.domDirty = true;
   for (const e of f.events || []) { S.logs.unshift(e); } if (S.logs.length > 250) S.logs.length = 250; if (f.path) S.path = f.path;
   if (S.mode === 'live') { if (MC.n() < 30000) { MC.push(f); MC.simUpdate(); } MC.cur = MC.n() - 1; } else MC.cur = S.idx;
   if (light) return;
@@ -131,12 +140,12 @@ function startReplay(world, frames) {
 }
 MC.openRecording = (frames) => { if (S.worldMsg) startReplay(S.worldMsg, frames); };
 function advanceTo(t) { while (S.idx + 1 < S.frames.length && S.frames[S.idx + 1].t_s <= t) { S.idx++; applyFrame(S.frames[S.idx], S.idx + 1 < S.frames.length && S.frames[S.idx + 1].t_s <= t); } }
-function seekTo(t) { S.idx = -1; S.logs = []; S.lit = null; S.path = null; MC.cur = -1; S.simT = t; advanceTo(t); $('seek').value = String(((t - S.T0) / Math.max(S.T1 - S.T0, 1)) * 1000); if (S.layer === 'terrain') buildLayer(); S.dirty = true; }
+function seekTo(t) { S.seeking = true; S.idx = -1; S.logs = []; S.lit = null; S.path = null; MC.cur = -1; S.simT = t; advanceTo(t); S.seeking = false; $('seek').value = String(((t - S.T0) / Math.max(S.T1 - S.T0, 1)) * 1000); if (S.layer === 'terrain') buildLayer(); S.dirty = true; }
 async function tryReplay() {
   try {
     const [w, r] = await Promise.all([fetch('sample/world.json'), fetch('sample/run.jsonl')]); if (!w.ok || !r.ok) throw new Error('no sample');
     const world = await w.json(), frames = (await r.text()).split('\n').filter(Boolean).map((l) => JSON.parse(l)); notice(''); startReplay(world, frames);
-    const seek = Q.get('seek'); if (seek !== null) { S.playing = false; $('play').textContent = 'Play'; seekTo(S.T0 + (S.T1 - S.T0) * Number(seek)); }
+    const seek = Q.get('seek'); if (seek !== null) { S.playing = Q.get('play') === '1'; $('play').textContent = S.playing ? 'Pause' : 'Play'; seekTo(S.T0 + (S.T1 - S.T0) * Number(seek)); }
   } catch (e) { setConn('off', 'Not connected'); notice('<b>No mission is connected.</b><br><br>Start one with<br><code>python -m lunar_ops.server</code><br>then reload this page. It connects by itself.'); }
 }
 function connectLive(url) {
@@ -154,6 +163,7 @@ async function loadTraining() { try { const r = await fetch('/api/training'); if
 // ---------------------------------------------------------------- animated clocks (NumberFlow) and colour mode
 MC.nfReady = () => { MC.setMet = MC.makeTimeFlow($('k-met')); MC.setRem = MC.makeTimeFlow($('k-rem'), false); MC.setSim = MC.makeTimeFlow($('simclock')); if (S.last) { renderTop(S.last); MC.setSim(S.last.t_s); } S.domDirty = true; S.dirty = true; };
 if (MC.NumberFlow) MC.nfReady();
+if (Q.get('still') === '1') document.documentElement.classList.add('still');
 function setTheme(mode) { document.documentElement.classList.toggle('bw', mode === 'bw'); for (const b of $('theme').children) b.classList.toggle('on', b.dataset.theme === mode); try { localStorage.setItem('mc-theme', mode); } catch (e) { /* private mode */ } S.dirty = true; }
 for (const b of $('theme').children) b.onclick = () => setTheme(b.dataset.theme);
 setTheme(Q.get('bw') === '1' ? 'bw' : (() => { try { return localStorage.getItem('mc-theme') || 'colour'; } catch (e) { return 'colour'; } })());
@@ -178,11 +188,12 @@ function frameLoop(now) {
   const dt = Math.min((now - tPrev) / 1000, 0.1); tPrev = now;
   if (S.mode === 'replay' && S.playing && S.frames.length) { S.simT += dt * S.speed; advanceTo(S.simT); if (S.idx >= S.frames.length - 1) { S.playing = false; $('play').textContent = 'Play'; } $('seek').value = String(((S.simT - S.T0) / Math.max(S.T1 - S.T0, 1)) * 1000); S.dirty = true; }
   if (S.tab === 'ghosts') MC.ghostTick(dt);
-  $('speedlab').textContent = `${S.speed >= 1000 ? S.speed / 1000 + 'k' : S.speed}×`;
+  $('speedlab').textContent = `${S.speed >= 1000 ? S.speed / 1000 + 'k' : S.speed}×`; MC.numify($('speedlab')); MC.numify($('k-phase')); MC.numify($('k-ctl'));
   if ((S.dirty && now - lastDraw > 66) || now - lastDraw > 500) { lastDraw = now; S.dirty = false; renderPanels(now, false); }
   requestAnimationFrame(frameLoop);
 }
 addEventListener('resize', () => { S.dirty = true; });
+if (document.fonts) { document.fonts.load('13px "Instrument Sans"'); document.fonts.load('500 12px "JetBrains Mono"'); document.fonts.ready.then(() => { S.dirty = true; S.domDirty = true; }); }
 MC.showTab(Q.get('tab') || location.hash.slice(1) || 'wall'); requestAnimationFrame(frameLoop); loadTraining(); MC.ghostLoadSaved(true);
 (async () => {
   const explicit = Q.get('ws'), auto = location.protocol.startsWith('http') ? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/ui` : null, url = explicit || (Q.get('replay') ? null : auto);

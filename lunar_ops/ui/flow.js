@@ -6,6 +6,12 @@
 'use strict';
 const MC = (window.MC = window.MC || {});
 MC.NumberFlow = null; MC.nfCache = new Map();
+// Wrap every number in already-rendered text with <span class="num"> so only numbers use the monospace font.
+MC.numify = function (root) {
+  if (!root) return; const nodes = [], w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode: (n) => { const p = n.parentElement; if (!p || p.closest('.num, number-flow, script, style, select, option, input, textarea')) return NodeFilter.FILTER_REJECT; return /\d/.test(n.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; } });
+  while (w.nextNode()) nodes.push(w.currentNode);
+  for (const n of nodes) { const parts = MC.splitNum(n.nodeValue); if (parts.every((p) => !p[1])) continue; const frag = document.createDocumentFragment(); for (const [s, isNum] of parts) { if (isNum) { const sp = document.createElement('span'); sp.className = 'num'; sp.textContent = s; frag.append(sp); } else frag.append(document.createTextNode(s)); } n.replaceWith(frag); }
+};
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 // Placeholder for an animated number. key must be unique within the panel. Falls back to plain text when v is not a number.
 MC.nf = function (key, v, o = {}) {
