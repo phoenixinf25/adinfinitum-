@@ -222,12 +222,65 @@ class TestFull30DayMissionExecution(unittest.TestCase):
         self.assertGreater(s0.time_to_sunset_s, 0.0)
         self.assertGreater(s0.time_to_earthrise_s, 0.0)
 
-        # 5. CSV export verification
+        # 5. CSV export verification and contract conformance
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "test_telemetry.csv"
             mod.export_telemetry_csv(history, csv_path, log_interval_s=300.0)
             self.assertTrue(csv_path.exists())
             self.assertGreater(csv_path.stat().st_size, 1000)
+
+            # Contract conformance check (contracts/runs.py TELEMETRY_COLUMNS)
+            from contracts.runs import read_telemetry, TELEMETRY_COLUMNS
+            rows = read_telemetry(csv_path)
+            self.assertEqual(len(rows), 8640)
+            self.assertEqual(tuple(rows[0].keys()), TELEMETRY_COLUMNS)
+            self.assertIn("SOC", rows[0]["decision"])
+
+    def test_spot_check_matches_navigator_metrics(self):
+        """Spot-check Basilisk simulation numbers with Nimansh's Navigator (navigator/metrics.py)."""
+        cfg = LanderPowerConfig(site_name="shackleton", battery_capacity_wh=12000.0)
+        mod = PowerCommsModule(config=cfg, light_dataset_path="data/light/shackleton_30d.npz")
+        history = mod.run_simulation(duration_days=30.0, dt_s=60.0)
+
+        # Obtain PointSeries from module
+        ps = mod.to_point_series(region="shackleton")
+        from navigator.metrics import summarize, sun_countdown, earth_countdown
+        s_nav = summarize(ps, k=0)
+
+        # Basilisk metrics restricted to the synodic window
+        synodic_max_s = (len(ps.times_utc) - 1) * 3600.0
+        hist_syn = [s for s in history if s.time_s <= synodic_max_s]
+        dt_hr = 60.0 / 3600.0
+
+        b_sun_hours = sum(s.sun_fraction > 0.0 for s in hist_syn) * dt_hr
+        b_earth_hours = sum(s.earth_visible for s in hist_syn) * dt_hr
+
+        # Assert agreement within 1.5 hours across the ~708h month
+        self.assertAlmostEqual(b_sun_hours, s_nav.sun_hours, delta=1.5)
+        self.assertAlmostEqual(b_earth_hours, s_nav.earth_hours, delta=1.5)
+
+        # Countdowns agreement at step 0
+        cd_sun = sun_countdown(ps, 0)
+        cd_earth = earth_countdown(ps, 0)
+        self.assertAlmostEqual(history[0].time_to_sunset_s / 3600.0, cd_sun.hours, delta=1.0)
+        self.assertAlmostEqual(history[0].time_to_earthrise_s / 3600.0, cd_earth.hours, delta=1.0)
+
+    def test_load_light_from_point_series_v2(self):
+        """PowerCommsModule must natively load a PointSeries archive from contracts/light.py."""
+        from contracts.light import load_points
+        ps_path = "data/light/shackleton_2026-11-14_points.npz"
+        if not Path(ps_path).exists():
+            mod0 = PowerCommsModule(light_dataset_path="data/light/shackleton_30d.npz")
+            ps = mod0.to_point_series(region="shackleton")
+            from contracts.light import save_points
+            save_points(ps, ps_path)
+
+        mod = PowerCommsModule(light_dataset_path=ps_path)
+        self.assertTrue(mod.has_precomputed_data)
+        self.assertEqual(len(mod.times_s), 709)
+        self.assertGreater(mod.sun_fractions.mean(), 0.0)
+        state0 = mod.step(dt_s=3600.0)
+        self.assertGreater(state0.power_in_w, 0.0)
 
 
 if __name__ == "__main__":

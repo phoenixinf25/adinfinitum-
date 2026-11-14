@@ -345,11 +345,10 @@ def generate_light_dataset(
         horiz_sun = float(horizon_mask[az_idx])
         sun_fraction[i] = calculate_sun_fraction(se, horiz_sun)
 
-        # Lookup horizon angle at Earth azimuth
+        # Lookup horizon angle at Earth azimuth (Earth is treated as point source per navigator/metrics.py)
         e_az_idx = int(round(ea)) % 360
         horiz_earth = float(horizon_mask[e_az_idx])
-        # Direct-to-Earth contact available if Earth center + semi-diameter > horizon
-        earth_visible[i] = bool(ee + EARTH_ANGULAR_RADIUS_DEG > horiz_earth)
+        earth_visible[i] = bool(ee > horiz_earth)
 
     # File naming: <region>_<range>.npz (e.g. shackleton_30d.npz)
     filename = f"{region_name}_{int(duration_days)}d.npz"

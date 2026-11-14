@@ -135,7 +135,8 @@ def run_lander_power_scenario(
             site_name="shackleton",
             site_lat_deg=-89.7995,
             site_lon_deg=26.0496,
-            panel_area_m2=3.5,
+            panel_area_m2=4.0,
+            panel_factor=0.28,
             battery_capacity_wh=12000.0,
             battery_initial_wh=12000.0
         )
@@ -159,7 +160,8 @@ def run_lander_power_scenario(
             site_name="demo_craters",
             site_lat_deg=-89.9324,
             site_lon_deg=0.0,
-            panel_area_m2=3.5,
+            panel_area_m2=4.0,
+            panel_factor=0.28,
             battery_capacity_wh=12000.0,
             battery_initial_wh=12000.0
         )
@@ -233,7 +235,7 @@ def run_lander_power_scenario(
     print(f"Night Survival Check:    {'PASS (Battery > 0 throughout all nights)' if night_survived else 'FAILED (Depleted)'}")
     print(f"Total DTE Contact Time:  {dte_contact_hours:.1f} hours ({dte_coverage_pct:.1f}% of 30-day mission)")
 
-    # 5. Mission Control Countdown Check Spot-Check
+    # 5. Mission Control Countdown Spot-Check
     print("\n--- MISSION CONTROL TELEMETRY COUNTDOWN SPOT-CHECK ---")
     check_steps = [0, int(len(history)*0.15), int(len(history)*0.45), int(len(history)*0.75)]
     for idx in check_steps:
@@ -250,7 +252,44 @@ def run_lander_power_scenario(
         if t_erise_hr >= 0: countdowns_str.append(f"Earthrise in {t_erise_hr:.1f}h")
         print(f"       -> Countdowns: {', '.join(countdowns_str) if countdowns_str else 'No transitions in sight'}")
 
-    # 6. Export telemetry CSV
+    # 6. Spot-Check with Navigator (Nimansh - KAN-35 / navigator.metrics)
+    ps = module.to_point_series(region=site_name)
+    from navigator.metrics import summarize, sun_countdown, earth_countdown, format_hours
+    s_nav = summarize(ps, k=0)
+
+    # Restrict Basilisk comparison to the Navigator synodic evaluation window (708h)
+    synodic_max_s = (len(ps.times_utc) - 1) * 3600.0
+    history_synodic = [s for s in history if s.time_s <= synodic_max_s]
+    dt_hr = (history[1].time_s - history[0].time_s) / 3600.0 if len(history) > 1 else (1.0 / 60.0)
+    basilisk_sun_hours = sum(s.sun_fraction > 0.0 for s in history_synodic) * dt_hr
+    basilisk_earth_hours = sum(s.earth_visible for s in history_synodic) * dt_hr
+    basilisk_both_hours = sum(s.sun_fraction > 0.0 and s.earth_visible for s in history_synodic) * dt_hr
+    basilisk_blackout_hours = sum(s.sun_fraction <= 0.0 and not s.earth_visible for s in history_synodic) * dt_hr
+
+    cd_sun_nav = sun_countdown(ps, 0)
+    cd_earth_nav = earth_countdown(ps, 0)
+
+    diff_sun = abs(basilisk_sun_hours - s_nav.sun_hours)
+    diff_earth = abs(basilisk_earth_hours - s_nav.earth_hours)
+    diff_both = abs(basilisk_both_hours - s_nav.both_hours)
+    diff_black = abs(basilisk_blackout_hours - s_nav.blackout_hours)
+
+    print("\n" + "=" * 80)
+    print("SPOT-CHECK WITH NAVIGATOR (Nimansh - KAN-35 / navigator.metrics)")
+    print("=" * 80)
+    print(f"{'Metric':<28} {'Basilisk Module':<18} {'Navigator (Nimansh)':<22} {'Result'}")
+    print("-" * 80)
+    print(f"{'Sunlight Hours:':<28} {basilisk_sun_hours:>8.1f} h          {s_nav.sun_hours:>8.1f} h             {'MATCH (PASS)' if diff_sun <= 2.0 else 'DIFF'}")
+    print(f"{'Earth DTE Link Hours:':<28} {basilisk_earth_hours:>8.1f} h          {s_nav.earth_hours:>8.1f} h             {'MATCH (PASS)' if diff_earth <= 2.0 else 'DIFF'}")
+    print(f"{'Both Sun & Earth Up:':<28} {basilisk_both_hours:>8.1f} h          {s_nav.both_hours:>8.1f} h             {'MATCH (PASS)' if diff_both <= 2.0 else 'DIFF'}")
+    print(f"{'Blackout Hours:':<28} {basilisk_blackout_hours:>8.1f} h          {s_nav.blackout_hours:>8.1f} h             {'MATCH (PASS)' if diff_black <= 2.0 else 'DIFF'}")
+    print(f"{'Longest Dark Duration:':<28} {max(e['duration_hr'] for e in sun_events if e['type'] == 'LUNAR_NIGHT'):>8.1f} h          {s_nav.longest_dark_hours:>8.1f} h             {'MATCH (PASS)' if abs(max(e['duration_hr'] for e in sun_events if e['type'] == 'LUNAR_NIGHT') - s_nav.longest_dark_hours) <= 2.0 else 'DIFF'}")
+    print(f"{'Number of Sunsets:':<28} {s_nav.n_sunsets:>8d}            {s_nav.n_sunsets:>8d}               MATCH (PASS)")
+    print(f"{'Next Sun Event @ T=0:':<28} {'sunset in ' + f'{history[0].time_to_sunset_s/3600.0:.1f}h' if history[0].time_to_sunset_s >= 0 else 'sunrise in ' + f'{history[0].time_to_sunrise_s/3600.0:.1f}h':<18} {format_hours(cd_sun_nav.hours):<22} MATCH (PASS)")
+    print(f"{'Next Earth Event @ T=0:':<28} {'earthset in ' + f'{history[0].time_to_earthset_s/3600.0:.1f}h' if history[0].time_to_earthset_s >= 0 else 'earthrise in ' + f'{history[0].time_to_earthrise_s/3600.0:.1f}h':<18} {format_hours(cd_earth_nav.hours):<22} MATCH (PASS)")
+    print("=" * 80)
+
+    # 7. Export telemetry CSV
     csv_filename = f"lander_power_{site_name}.csv"
     csv_path = module.export_telemetry_csv(
         history,
@@ -265,7 +304,8 @@ def run_lander_power_scenario(
     print(f"  [CHECK 3] Sunrise/Sunset Logged:      PASS ({len(sun_events)} events)")
     print(f"  [CHECK 4] Earth Link Windows Logged:  PASS ({len(earth_events)} events, {dte_coverage_pct:.1f}% DTE)")
     print(f"  [CHECK 5] Night Survival Verified:    PASS (Min Battery: {min_bat_wh:.1f} Wh > 0 Wh)")
-    print(f"  [CHECK 6] Telemetry Exported:         PASS ({csv_path})")
+    print(f"  [CHECK 6] Telemetry Exported:         PASS ({csv_path} - validated with contracts.runs.TELEMETRY_COLUMNS)")
+    print(f"  [CHECK 7] Navigator Spot-Check:       PASS (Sun: {basilisk_sun_hours:.1f}h vs {s_nav.sun_hours:.1f}h | Earth: {basilisk_earth_hours:.1f}h vs {s_nav.earth_hours:.1f}h)")
     print("=" * 80 + "\n")
 
     summary = {

@@ -7,33 +7,42 @@ import csv
 import json
 from pathlib import Path
 
-csv_path = Path("runs/basilisk/lander_power_shackleton.csv")
+csv_path = Path("runs/basilisk/lander_power_shackleton_detailed.csv")
+if not csv_path.exists():
+    csv_path = Path("runs/basilisk/lander_power_shackleton.csv")
 if not csv_path.exists():
     raise FileNotFoundError(f"Missing {csv_path}")
 
 telemetry = []
 with open(csv_path, "r", encoding="utf-8") as f:
     for row in csv.DictReader(f):
+        t_s = float(row["t_s"]) if "t_s" in row else float(row["time_s"])
+        t_days = float(row.get("time_days", t_s / 86400.0))
+        p_in = float(row.get("power_in_w", row.get("solar_w", 0.0)))
+        bat_wh = float(row.get("battery_wh", 0.0))
+        bat_pct = float(row.get("battery_pct", (bat_wh / 12000.0) * 100.0))
+        earth_vis = int(row.get("earth_visible", 0))
+
         telemetry.append({
-            "t_d": round(float(row["time_days"]), 3),
-            "t_h": round(float(row["time_s"]) / 3600.0, 1),
-            "sun_frac": float(row["sun_fraction"]),
-            "sun_elev": float(row["sun_elevation_deg"]),
-            "earth_vis": int(row["earth_visible"]),
-            "earth_elev": float(row["earth_elevation_deg"]),
-            "p_in": round(float(row["power_in_w"]), 1),
-            "p_load": round(float(row["load_total_w"]), 1),
-            "p_avionics": round(float(row["load_avionics_w"]), 1),
-            "p_heaters": round(float(row["load_heaters_w"]), 1),
-            "p_radio": round(float(row["load_radio_w"]), 1),
-            "bat_wh": round(float(row["battery_wh"]), 1),
-            "bat_pct": round(float(row["battery_pct"]), 1),
-            "temp_c": round(float(row["temperature_c"]), 1),
-            "t_sunset_h": round(float(row["time_to_sunset_s"]) / 3600.0, 1) if float(row["time_to_sunset_s"]) >= 0 else -1,
-            "t_sunrise_h": round(float(row["time_to_sunrise_s"]) / 3600.0, 1) if float(row["time_to_sunrise_s"]) >= 0 else -1,
-            "t_eset_h": round(float(row["time_to_earthset_s"]) / 3600.0, 1) if float(row["time_to_earthset_s"]) >= 0 else -1,
-            "t_erise_h": round(float(row["time_to_earthrise_s"]) / 3600.0, 1) if float(row["time_to_earthrise_s"]) >= 0 else -1,
-            "status": row["status"]
+            "t_d": round(t_days, 3),
+            "t_h": round(t_s / 3600.0, 1),
+            "sun_frac": float(row.get("sun_fraction", 1.0 if p_in > 0 else 0.0)),
+            "sun_elev": float(row.get("sun_elevation_deg", 0.0)),
+            "earth_vis": earth_vis,
+            "earth_elev": float(row.get("earth_elevation_deg", 0.0)),
+            "p_in": round(p_in, 1),
+            "p_load": round(float(row.get("load_total_w", 35.0)), 1),
+            "p_avionics": round(float(row.get("load_avionics_w", 20.0)), 1),
+            "p_heaters": round(float(row.get("load_heaters_w", 15.0)), 1),
+            "p_radio": round(float(row.get("load_radio_w", 35.0 if earth_vis else 4.0)), 1),
+            "bat_wh": round(bat_wh, 1),
+            "bat_pct": round(bat_pct, 1),
+            "temp_c": round(float(row.get("temperature_c", 20.0)), 1),
+            "t_sunset_h": round(float(row.get("time_to_sunset_s", -1)) / 3600.0, 1) if float(row.get("time_to_sunset_s", -1)) >= 0 else -1,
+            "t_sunrise_h": round(float(row.get("time_to_sunrise_s", -1)) / 3600.0, 1) if float(row.get("time_to_sunrise_s", -1)) >= 0 else -1,
+            "t_eset_h": round(float(row.get("time_to_earthset_s", -1)) / 3600.0, 1) if float(row.get("time_to_earthset_s", -1)) >= 0 else -1,
+            "t_erise_h": round(float(row.get("time_to_earthrise_s", -1)) / 3600.0, 1) if float(row.get("time_to_earthrise_s", -1)) >= 0 else -1,
+            "status": row.get("status", row.get("decision", "NOMINAL"))
         })
 
 html_content = f"""<!DOCTYPE html>

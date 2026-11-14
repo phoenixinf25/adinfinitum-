@@ -1,0 +1,100 @@
+# Adinfinitium mission configuration — the ONE place for numbers.
+# Every value here is a DESIGN ASSUMPTION unless its `source` says otherwise.
+# Units are SI unless the key name says otherwise (e.g. _deg, _kg, _w).
+# Loaded and validated by contracts/mission.py — run `python -m contracts.mission` to check it.
+
+schema_version: 1
+
+mission_window:                 # dates the Navigator and swarm may choose from (design assumption)
+  start_utc: "2027-01-01T00:00:00Z"
+  end_utc: "2028-12-31T23:59:59Z"
+
+moon:
+  gravity_m_s2: 1.62            # source: standard lunar surface gravity (uniform model for terminal descent)
+  radius_m: 1737400.0           # source: IAU mean lunar radius
+  g0_m_s2: 9.80665              # standard gravity, used only for Isp -> mass flow
+
+lander:
+  wet_mass_at_release_kg: 1500.0     # assumption; Chandrayaan-3 lander was 1,752 kg
+  dry_mass_kg: 760.0                 # assumption; leaves ~740 kg propellant at release
+  isp_s: 310.0                       # MMH/MON3 bipropellant family (300–315 s)
+  engines:
+    count: 5                         # 4 outer + 1 centre
+    max_thrust_n: 800.0              # per engine; 800 N class flew on Chandrayaan-3
+    min_throttle: 0.40               # fraction of max; throttleable engines cannot go to zero
+  max_tilt_deg: 45.0                 # 3-DOF stand-in for attitude: thrust may tilt this far from vertical
+  attitude_thrusters:
+    count: 8
+    thrust_n: 58.0                   # Chandrayaan-3 used 58 N attitude thrusters
+  touchdown_limits:                  # source: Chandrayaan-3 published touchdown spec (prototype default)
+    max_vertical_speed_m_s: 2.0
+    max_horizontal_speed_m_s: 0.5
+    max_slope_deg: 12.0
+  descent_delta_v_budget_m_s: 2000.0 # estimate from ~100 km orbit incl. gravity losses; sim computes real value
+
+rover:
+  mass_kg: 25.0                      # Pragyan class
+  speed_m_s: 0.01
+  max_slope_deg: 20.0                # assumption
+  solar_panel_w: 50.0
+  battery_wh: 100.0                  # assumption; swarm may tune
+  comms: relay_via_lander
+
+power:
+  panel_area_m2: 4.0                 # lander, assumption
+  panel_efficiency: 0.28
+  solar_constant_w_m2: 1361.0
+  battery_wh_min: 500.0              # swarm gene bounds
+  battery_wh_max: 4000.0
+  heater_w_min: 5.0
+  heater_w_max: 60.0
+  survival_load_w: 15.0              # avionics keep-alive at night, assumption
+
+# Simulation scenarios. The JAX swarm starts at the beginning of the chosen phase.
+scenarios:
+  terminal:                          # fine braking -> hover -> touchdown (where the evolved pilot starts)
+    dt_s: 0.1
+    max_time_s: 240.0
+    start_altitude_m: [1500.0, 2500.0]          # uniform range above target terrain
+    start_horizontal_offset_m: [-600.0, 600.0]  # per axis, from target
+    start_vertical_speed_m_s: [-60.0, -30.0]
+    start_horizontal_speed_m_s: [-25.0, 25.0]   # per axis
+    start_mass_kg: 900.0
+    start_propellant_kg: 140.0
+    hover_gate_altitude_m: 30.0      # classic guidance aims here, then descends vertically
+    final_descent_speed_m_s: 1.0
+
+# Failure injection — probability per mission (Phase 4–6).
+failures:
+  engine_out_prob: 0.10
+  nav_drift_prob: 0.10
+  nav_drift_m_s: 0.3                 # velocity bias magnitude when drift occurs
+  camera_blind_prob: 0.05
+  surprise_hazard_prob: 0.10
+
+sensor_noise:                        # 1-sigma
+  altimeter_m: 1.0
+  velocimeter_m_s: 0.05
+  position_m: 5.0
+
+# Mission fitness weights (shown on screen; see docs/SYSTEM_DESIGN.md §6).
+scoring:
+  landing_gate: true                 # unsafe landing => total score 0
+  w_landed: 100.0
+  w_target_distance_per_m: 0.05      # penalty per metre from target
+  w_fuel_per_kg: 0.2                 # penalty per kg of propellant used
+  w_ice_reached: 50.0
+  w_rover_returned: 25.0
+  w_survived_night: 100.0
+  w_data_per_mb: 0.1
+
+# Hazard detector (KAN-25). The slope limit itself is lander.touchdown_limits.max_slope_deg.
+hazard_detector:
+  decision_threshold: 0.5            # probability at/above which a pixel counts as UNSAFE (precision/recall)
+  gap_fill_sigma_px: [2.5, 5.0, 10.0, 20.0, 40.0]  # assumption: gaussian widths (coarse fallback) used to fill the ~90% of
+                                     # pixels without a LOLA laser return, for BOTH the U-Net input and the slope-rule backup
+
+swarm:
+  population: 10000
+  generations_overnight: 300
+  seed: 42

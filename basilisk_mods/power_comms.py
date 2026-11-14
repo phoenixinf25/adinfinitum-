@@ -44,9 +44,9 @@ class LanderPowerConfig:
     site_lon_deg: float = 26.0496   # [deg] Planetocentric longitude
 
     # Solar Array Parameters
-    panel_area_m2: float = 3.5           # [m^2] Total solar array surface area
+    panel_area_m2: float = 4.0           # [m^2] Total solar array surface area (config/mission.yaml)
     solar_constant_w_m2: float = 1361.0  # [W/m^2] Solar irradiance at 1 AU
-    panel_factor: float = 0.28           # [-] Conversion factor (efficiency, angle of incidence, dust)
+    panel_factor: float = 0.28           # [-] Conversion factor (panel_efficiency: 0.28 in mission.yaml)
 
     # Battery Storage Parameters (12 kWh class sized for lunar night survival)
     battery_capacity_wh: float = 12000.0  # [W*h] Total nominal energy capacity
@@ -58,7 +58,7 @@ class LanderPowerConfig:
 
     # Electrical Power Loads
     load_avionics_day_w: float = 40.0     # [W] Daytime continuous avionics & payload sensors
-    load_avionics_night_w: float = 12.0   # [W] Nighttime quiescent survival avionics
+    load_avionics_night_w: float = 15.0   # [W] Nighttime quiescent survival avionics (survival_load_w: 15.0W in mission.yaml)
     load_heater_day_w: float = 10.0       # [W] Daytime thermal control regulation
     load_heater_night_w: float = 18.0     # [W] Nighttime survival heaters (higher at night)
     load_radio_tx_w: float = 35.0         # [W] High-gain transmitter when Earth link is available
@@ -148,36 +148,140 @@ class PowerCommsModule:
         self.ephem = ephem_model or LunarEphemeris()
         self.step_idx: int = 0
         self.has_precomputed_data: bool = False
+        self.point_series = None
 
         if light_dataset_path is not None:
             self.load_light_dataset(light_dataset_path)
 
-    def load_light_dataset(self, npz_path: str | Path) -> None:
+    def load_light_dataset(self, npz_path: str | Path, cell_idx: int = 0) -> None:
         """
         Load precomputed illumination and Earth visibility data from a NumPy archive,
+        supporting contracts/light.py PointSeries / LightField as well as raw simulation archives,
         and precompute O(1) countdown lookahead tables in a single backward pass.
 
         Parameters:
-            npz_path: Path to data/light/<region>_<range>.npz.
+            npz_path: Path to data/light/<region>_<range>.npz or <region>_<date>_points.npz.
+            cell_idx: Candidate cell index (default: 0) when reading PointSeries.
         """
         p = Path(npz_path)
         if not p.exists():
             raise FileNotFoundError(f"Light dataset not found: {p}")
 
         data = np.load(p, allow_pickle=True)
-        self.times_s = data["time_s"]
-        self.sun_fractions = data["sun_fraction"]
-        self.sun_elevations = data["sun_elevation_deg"]
-        self.earth_visibles = data["earth_visible"]
-        self.earth_elevations = data["earth_elevation_deg"]
-        if "horizon_mask_deg" in data:
-            self.horizon_mask_deg = data["horizon_mask_deg"]
+        if "header" in data.files:
+            # PointSeries or LightField format from contracts/light.py
+            try:
+                from contracts.light import load_points
+                ps = load_points(p)
+                self.times_s = ps.et_s - ps.et_s[0]
+                self.sun_fractions = ps.sun_fraction[:, cell_idx]
+                self.sun_elevations = ps.sun_elev_deg[:, cell_idx]
+                self.earth_visibles = ps.earth_visible()[:, cell_idx]
+                self.earth_elevations = ps.earth_elev_deg[:, cell_idx]
+                self.horizon_mask_deg = ps.horizon_elev_deg[cell_idx]
+                self.point_series = ps
+            except Exception:
+                from contracts.light import load_light
+                lf = load_light(p)
+                self.times_s = lf.et_s - lf.et_s[0]
+                r, c = (lf.sun_fraction.shape[1] // 2, lf.sun_fraction.shape[2] // 2)
+                self.sun_fractions = lf.sun_fraction[:, r, c]
+                self.sun_elevations = lf.sun_elev_deg[:, r, c]
+                self.earth_visibles = lf.earth_visible()[:, r, c]
+                self.earth_elevations = lf.earth_elev_deg[:, r, c]
+                self.point_series = None
+        elif "time_s" in data.files:
+            self.times_s = data["time_s"]
+            self.sun_fractions = data["sun_fraction"]
+            self.sun_elevations = data["sun_elevation_deg"]
+            self.earth_visibles = data["earth_visible"]
+            self.earth_elevations = data["earth_elevation_deg"]
+            self.sun_azimuths = data["sun_azimuth_deg"] if "sun_azimuth_deg" in data.files else np.zeros(len(self.times_s), dtype=np.float32)
+            self.earth_azimuths = data["earth_azimuth_deg"] if "earth_azimuth_deg" in data.files else np.zeros(len(self.times_s), dtype=np.float32)
+            if "horizon_mask_deg" in data.files:
+                self.horizon_mask_deg = data["horizon_mask_deg"]
+            self.point_series = None
+        else:
+            raise ValueError(f"Unrecognized light archive keys: {data.files}")
+
         self.has_precomputed_data = True
         self.step_idx = 0
 
         # Vectorized precomputation of countdowns in O(N)
         self._precompute_countdowns()
         print(f"[PowerComms] Loaded light dataset from {p} ({len(self.times_s)} points)")
+
+    def to_point_series(
+        self,
+        region: str | None = None,
+        date_str: str = "2026-11-14",
+        cadence_s: float = 3600.0,
+        max_samples: int = 709
+    ) -> Any:
+        """
+        Export module illumination and visibility profile into a standardized PointSeries (contracts/light.py).
+        Extracts at 1-hour cadence for Navigator analysis.
+
+        Parameters:
+            region: Optional region name (defaults to self.config.site_name).
+            date_str: ISO start date string YYYY-MM-DD (default: '2026-11-14').
+            cadence_s: Sampling interval in seconds [s] (default: 3600 s = 1 hr).
+            max_samples: Maximum number of synodic samples (default: 709).
+
+        Returns:
+            PointSeries instance compliant with light contract v2.
+        """
+        if self.point_series is not None:
+            return self.point_series
+
+        from datetime import datetime, timedelta, UTC
+        from contracts.light import PointSeries
+        from contracts.provenance import Meta, Provenance
+
+        reg = region or self.config.site_name
+        dt_sim = float(self.times_s[1] - self.times_s[0]) if len(self.times_s) > 1 else 60.0
+        step_stride = max(1, int(round(cadence_s / dt_sim)))
+
+        indices = np.arange(0, len(self.times_s), step_stride)
+        if len(indices) > max_samples:
+            indices = indices[:max_samples]
+        elif len(indices) < max_samples:
+            indices = np.pad(indices, (0, max_samples - len(indices)), mode="edge")
+
+        t0 = datetime.fromisoformat(date_str).replace(tzinfo=UTC)
+        j2000 = datetime(2000, 1, 1, 12, 0, 0, tzinfo=UTC)
+        times_utc = [(t0 + timedelta(seconds=float(self.times_s[i]))).strftime("%Y-%m-%dT%H:%M:%SZ") for i in indices]
+        et_s = np.array([(t0 + timedelta(seconds=float(self.times_s[i])) - j2000).total_seconds() for i in indices])
+
+        sun_frac = self.sun_fractions[indices, None].astype(np.float32)
+        sun_el = self.sun_elevations[indices, None].astype(np.float32)
+        earth_el = self.earth_elevations[indices, None].astype(np.float32)
+
+        if self.horizon_mask_deg is not None and len(self.horizon_mask_deg) == 360:
+            horiz = self.horizon_mask_deg.reshape(1, 360).astype(np.float32)
+        else:
+            horiz = np.zeros((1, 360), dtype=np.float32)
+
+        sun_az = self.sun_azimuths[indices].astype(np.float32) if hasattr(self, "sun_azimuths") and len(self.sun_azimuths) > 0 else np.zeros(len(indices), dtype=np.float32)
+        earth_az = self.earth_azimuths[indices].astype(np.float32) if hasattr(self, "earth_azimuths") and len(self.earth_azimuths) > 0 else np.zeros(len(indices), dtype=np.float32)
+
+        meta = Meta(provenance=Provenance.MODELLED, source=f"PowerCommsModule simulation {reg}")
+        ps = PointSeries(
+            region=reg,
+            date=date_str,
+            cells=np.array([[0, 0]]),
+            times_utc=times_utc,
+            et_s=et_s,
+            sun_fraction=sun_frac,
+            sun_elev_deg=sun_el,
+            earth_elev_deg=earth_el,
+            sun_az_deg=sun_az,
+            earth_az_deg=earth_az,
+            horizon_elev_deg=horiz,
+            meta=meta
+        )
+        ps.validate()
+        return ps
 
     def _precompute_countdowns(self) -> None:
         """Precompute countdown times to sunset, sunrise, Earthset, Earthrise in O(N)."""
@@ -513,6 +617,8 @@ class PowerCommsModule:
     ) -> Path:
         """
         Export simulation telemetry history to a standardized CSV file.
+        Writes both the team contract format (contracts/runs.py TELEMETRY_COLUMNS)
+        and an extended engineering breakdown CSV (<name>_detailed.csv).
 
         Parameters:
             history: List of LanderPowerState records.
@@ -525,7 +631,53 @@ class PowerCommsModule:
         out_path = Path(output_csv_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        fieldnames = [
+        # 1. Standard Contract Telemetry (contracts/runs.py TELEMETRY_COLUMNS)
+        standard_rows = []
+        last_logged_t = -log_interval_s
+        for s in history:
+            if s.time_s - last_logged_t >= log_interval_s - 1e-4:
+                countdowns = []
+                if s.time_to_sunset_s >= 0:
+                    countdowns.append(f"sunset in {s.time_to_sunset_s/3600.0:.1f}h")
+                elif s.time_to_sunrise_s >= 0:
+                    countdowns.append(f"sunrise in {s.time_to_sunrise_s/3600.0:.1f}h")
+                if s.time_to_earthset_s >= 0:
+                    countdowns.append(f"earthset in {s.time_to_earthset_s/3600.0:.1f}h")
+                elif s.time_to_earthrise_s >= 0:
+                    countdowns.append(f"earthrise in {s.time_to_earthrise_s/3600.0:.1f}h")
+                cd_text = ", ".join(countdowns) if countdowns else "no transition in window"
+                decision_str = f"SOC {s.battery_pct:.1f}% | {cd_text} | status: {s.status}"
+
+                standard_rows.append({
+                    "t_s": s.time_s,
+                    "phase": "surface",
+                    "x_m": 0.0,
+                    "y_m": 0.0,
+                    "alt_m": 0.0,
+                    "vx_m_s": 0.0,
+                    "vy_m_s": 0.0,
+                    "vz_m_s": 0.0,
+                    "mass_kg": 760.0,
+                    "fuel_kg": 0.0,
+                    "thrust_n": 0.0,
+                    "engines_ok": 1,
+                    "battery_wh": round(s.battery_wh, 2),
+                    "solar_w": round(s.power_in_w, 2),
+                    "earth_visible": 1 if s.earth_visible else 0,
+                    "decision": decision_str,
+                })
+                last_logged_t = s.time_s
+
+        try:
+            from contracts.runs import write_telemetry
+            write_telemetry(standard_rows, out_path)
+            print(f"[PowerComms CSV] Exported {len(standard_rows)} records to {out_path.resolve()} (contract format)")
+        except Exception as e:
+            print(f"[PowerComms CSV] Fallback standard writer: {e}")
+
+        # 2. Detailed Engineering Breakdown CSV
+        detailed_path = out_path.parent / f"{out_path.stem}_detailed.csv"
+        detailed_fieldnames = [
             "time_s", "time_days", "sun_fraction", "sun_elevation_deg",
             "earth_visible", "earth_elevation_deg", "power_in_w",
             "load_total_w", "load_avionics_w", "load_heaters_w", "load_radio_w", "load_rover_w",
@@ -536,9 +688,8 @@ class PowerCommsModule:
 
         last_logged_t = -log_interval_s
         rows = 0
-
-        with open(out_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+        with open(detailed_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=detailed_fieldnames)
             writer.writeheader()
             for s in history:
                 if s.time_s - last_logged_t >= log_interval_s - 1e-4:
@@ -568,5 +719,5 @@ class PowerCommsModule:
                     last_logged_t = s.time_s
                     rows += 1
 
-        print(f"[PowerComms CSV] Exported {rows} records to {out_path.resolve()}")
+        print(f"[PowerComms CSV] Exported {rows} detailed records to {detailed_path.resolve()}")
         return out_path
