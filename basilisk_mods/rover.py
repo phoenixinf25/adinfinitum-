@@ -406,7 +406,8 @@ class LunarRover:
 
 def export_rover_vizard_mesh(output_obj_path: str | Path = "vizard/rover_body.obj") -> Path:
     """
-    Generate a 3D Wavefront OBJ mesh of the ~25 kg Pragyan/VIPER class lunar rover
+    Generate an authentic 3D Wavefront OBJ mesh of ISRO's Chandrayaan-3 Pragyan rover
+    (~26 kg, 6-wheel rocker-bogie, 50W deployable solar array, NavCams, LIBS, and APXS)
     for Basilisk Vizard 3D visualization.
 
     Parameters:
@@ -418,47 +419,117 @@ def export_rover_vizard_mesh(output_obj_path: str | Path = "vizard/rover_body.ob
     out_path = Path(output_obj_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Simplified box chassis + solar panel plane + mast geometry (all dimensions in metres)
-    # Rover scale: length 0.9 m, width 0.75 m, height 0.5 m
-    lx, ly, lz = 0.45, 0.35, 0.15
+    verts: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, int, int]] = []
+    groups: list[tuple[str, int]] = []  # (group_name, face_start_idx)
 
-    vertices = [
-        # Chassis box (8 vertices)
-        (-lx, -ly, 0.10), (lx, -ly, 0.10), (lx, ly, 0.10), (-lx, ly, 0.10),
-        (-lx, -ly, 0.10 + 2 * lz), (lx, -ly, 0.10 + 2 * lz), (lx, ly, 0.10 + 2 * lz), (-lx, ly, 0.10 + 2 * lz),
-        # Solar panel top sheet (4 vertices)
-        (-lx * 1.1, -ly * 1.1, 0.10 + 2 * lz + 0.02),
-        (lx * 1.1, -ly * 1.1, 0.10 + 2 * lz + 0.02),
-        (lx * 1.1, ly * 1.1, 0.10 + 2 * lz + 0.02),
-        (-lx * 1.1, ly * 1.1, 0.10 + 2 * lz + 0.02),
-        # Antenna mast top (1 vertex)
-        (0.0, 0.0, 0.80)
-    ]
+    def add_box(cx: float, cy: float, cz: float, dx: float, dy: float, dz: float, grp: str = "") -> None:
+        start_v = len(verts) + 1
+        hx, hy, hz = dx / 2.0, dy / 2.0, dz / 2.0
+        # 8 corners
+        b_verts = [
+            (cx - hx, cy - hy, cz - hz), (cx + hx, cy - hy, cz - hz),
+            (cx + hx, cy + hy, cz - hz), (cx - hx, cy + hy, cz - hz),
+            (cx - hx, cy - hy, cz + hz), (cx + hx, cy - hy, cz + hz),
+            (cx + hx, cy + hy, cz + hz), (cx - hx, cy + hy, cz + hz),
+        ]
+        verts.extend(b_verts)
+        b_faces = [
+            (start_v, start_v + 3, start_v + 2), (start_v, start_v + 2, start_v + 1),       # bottom (-z)
+            (start_v + 4, start_v + 5, start_v + 6), (start_v + 4, start_v + 6, start_v + 7), # top (+z)
+            (start_v, start_v + 1, start_v + 5), (start_v, start_v + 5, start_v + 4),       # front (-y)
+            (start_v + 2, start_v + 3, start_v + 7), (start_v + 2, start_v + 7, start_v + 6), # back (+y)
+            (start_v, start_v + 4, start_v + 7), (start_v, start_v + 7, start_v + 3),       # left (-x)
+            (start_v + 1, start_v + 2, start_v + 6), (start_v + 1, start_v + 6, start_v + 5), # right (+x)
+        ]
+        if grp:
+            groups.append((grp, len(faces)))
+        faces.extend(b_faces)
 
-    faces = [
-        # Chassis bottom
-        (1, 4, 3), (1, 3, 2),
-        # Chassis top
-        (5, 6, 7), (5, 7, 8),
-        # Chassis sides
-        (1, 2, 6), (1, 6, 5),
-        (2, 3, 7), (2, 7, 6),
-        (3, 4, 8), (3, 8, 7),
-        (4, 1, 5), (4, 5, 8),
-        # Solar panel
-        (9, 10, 11), (9, 11, 12),
-        # Mast pyramid
-        (13, 5, 6), (13, 6, 7), (13, 7, 8), (13, 8, 5)
-    ]
+    def add_cylinder(cx: float, cy: float, cz: float, r: float, length: float, axis: str = "x", segments: int = 8, grp: str = "") -> None:
+        start_v = len(verts) + 1
+        if grp:
+            groups.append((grp, len(faces)))
+        for i in range(segments):
+            ang = 2.0 * math.pi * i / segments
+            ca, sa = math.cos(ang), math.sin(ang)
+            if axis == "x":
+                verts.append((cx - length / 2.0, cy + r * ca, cz + r * sa))
+                verts.append((cx + length / 2.0, cy + r * ca, cz + r * sa))
+            elif axis == "y":
+                verts.append((cx + r * ca, cy - length / 2.0, cz + r * sa))
+                verts.append((cx + r * ca, cy + length / 2.0, cz + r * sa))
+            else:
+                verts.append((cx + r * ca, cy + r * sa, cz - length / 2.0))
+                verts.append((cx + r * ca, cy + r * sa, cz + length / 2.0))
 
+        for i in range(segments):
+            next_i = (i + 1) % segments
+            v1 = start_v + 2 * i
+            v2 = start_v + 2 * i + 1
+            v3 = start_v + 2 * next_i + 1
+            v4 = start_v + 2 * next_i
+            faces.append((v1, v2, v3))
+            faces.append((v1, v3, v4))
+
+    # 1. Pragyan Gold MLI Insulated Chassis (0.917m length x 0.75m width x 0.397m height)
+    add_box(0.0, 0.0, 0.28, 0.65, 0.85, 0.22, grp="chassis_gold_mli")
+
+    # 2. Deployable Solar Panel (50W rated, angled on starboard side)
+    add_box(0.18, 0.0, 0.44, 0.50, 0.82, 0.025, grp="solar_array_50w")
+
+    # 3. Stereo NavCam Optical Assembly (front-facing stereo cameras)
+    add_box(0.0, -0.42, 0.46, 0.30, 0.04, 0.04, grp="navcam_stereo_bar")
+    add_box(-0.12, -0.44, 0.46, 0.05, 0.04, 0.05, grp="navcam_left")
+    add_box(0.12, -0.44, 0.46, 0.05, 0.04, 0.05, grp="navcam_right")
+
+    # 4. Science Payloads: LIBS (front optical head) & APXS (rear sensor head)
+    add_box(-0.15, -0.38, 0.32, 0.12, 0.08, 0.10, grp="libs_payload")
+    add_box(0.0, 0.44, 0.24, 0.14, 0.10, 0.08, grp="apxs_spectrometer")
+    add_cylinder(0.0, 0.40, 0.24, 0.02, 0.12, axis="y", grp="apxs_deployment_arm")
+
+    # 5. Communications Antenna Mast (links to Vikram lander)
+    add_cylinder(0.22, 0.25, 0.55, 0.018, 0.35, axis="z", grp="comms_antenna_mast")
+
+    # 6. Rocker-Bogie Mobility System & 6 Cleated Lunar Wheels
+    # Pragyan wheel diameter: 170 mm (0.17 m radius 0.085 m), width 50 mm
+    wheel_radius = 0.085
+    wheel_width = 0.075
+    wheel_x_left = -0.38
+    wheel_x_right = 0.38
+    wheel_y_positions = [-0.32, 0.0, 0.32]  # Front, Middle, Rear
+
+    for wy in wheel_y_positions:
+        # Left wheel
+        add_cylinder(wheel_x_left, wy, wheel_radius + 0.01, wheel_radius, wheel_width, axis="x", grp="rocker_bogie_wheels")
+        # Right wheel
+        add_cylinder(wheel_x_right, wy, wheel_radius + 0.01, wheel_radius, wheel_width, axis="x", grp="rocker_bogie_wheels")
+
+    # Suspension connecting bogie struts
+    add_cylinder(wheel_x_left + 0.04, -0.16, 0.16, 0.016, 0.35, axis="y", grp="suspension_struts")
+    add_cylinder(wheel_x_right - 0.04, -0.16, 0.16, 0.016, 0.35, axis="y", grp="suspension_struts")
+
+    # Write Wavefront OBJ file
     with open(out_path, "w", encoding="utf-8") as f:
-        f.write("# Wavefront OBJ model for Basilisk Vizard: 25 kg Lunar Rover\n")
-        f.write("# Dimensions: 0.9m x 0.75m x 0.8m (mass ~25 kg, Pragyan/VIPER class)\n\n")
-        for v in vertices:
+        f.write("# Wavefront OBJ model for Basilisk Vizard / 3D Viewer\n")
+        f.write("# Model: ISRO Chandrayaan-3 'Pragyan' Lunar Exploration Rover\n")
+        f.write("# Mass: ~26 kg | Speed: 0.01 m/s (1 cm/s) | Power: 50 W Solar Array\n")
+        f.write("# Payloads: LIBS (Laser Spectroscope) + APXS (Alpha Particle X-Ray Spectrometer)\n")
+        f.write(f"# Vertices: {len(verts)} | Faces: {len(faces)}\n\n")
+
+        for v in verts:
             f.write(f"v {v[0]:.4f} {v[1]:.4f} {v[2]:.4f}\n")
-        f.write("\ng rover_mesh\n")
-        for fc in faces:
+
+        # Map faces to groups
+        grp_map: dict[int, str] = dict(groups)
+        current_grp = "pragyan_rover"
+        f.write(f"\ng {current_grp}\n")
+
+        for idx, fc in enumerate(faces):
+            if idx in grp_map:
+                current_grp = grp_map[idx]
+                f.write(f"g {current_grp}\n")
             f.write(f"f {fc[0]} {fc[1]} {fc[2]}\n")
 
-    print(f"[Vizard OBJ] Created rover 3D body model at {out_path}")
+    print(f"[Vizard OBJ] Generated Pragyan 3 3D rover mesh at {out_path} ({len(verts)} vertices, {len(faces)} faces)")
     return out_path
