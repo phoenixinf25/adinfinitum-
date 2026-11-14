@@ -646,6 +646,9 @@ class LunarTerrain:
 # 3. Global / Module-Level Functional API
 # ==============================================================================
 
+# Alias required by SIMULATION_TEAM_HANDBOOK.md (KAN-42 / KAN-44)
+Terrain = LunarTerrain
+
 # Module-level default active terrain instance
 _ACTIVE_TERRAIN: LunarTerrain | None = None
 

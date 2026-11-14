@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Adinfinitium // Basilisk Vizard 3D Hero Mission Replay</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+  body { background: #030712; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  #canvas3d { width: 100vw; height: 100vh; display: block; }
+
+  /* Top HUD Bar */
+  .hud-top {
+    position: absolute; top: 16px; left: 20px; right: 20px;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    pointer-events: none; z-index: 10;
+  }
+  .hud-glass {
+    background: rgba(15, 23, 42, 0.88); backdrop-filter: blur(14px);
+    border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 12px;
+    padding: 12px 20px; pointer-events: auto; box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+  }
+  .title-row { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .badge-bsk { background: linear-gradient(135deg, #0284c7, #0369a1); color: #fff; font-weight: 700; font-size: 11px; padding: 3px 8px; border-radius: 6px; letter-spacing: 0.5px; }
+  .badge-prov { background: rgba(56, 189, 248, 0.15); border: 1px solid #38bdf8; color: #38bdf8; font-weight: 700; font-size: 11px; padding: 3px 8px; border-radius: 6px; }
+  .badge-warn { background: rgba(245, 158, 11, 0.15); border: 1px solid #f59e0b; color: #fbbf24; font-weight: 700; font-size: 11px; padding: 3px 8px; border-radius: 6px; }
+  .title-text { font-size: 17px; font-weight: 700; color: #f8fafc; letter-spacing: 0.5px; }
+
+  /* Phase Tabs */
+  .phase-selector {
+    display: flex; gap: 8px; margin-top: 10px;
+  }
+  .phase-btn {
+    background: rgba(30, 41, 59, 0.8); border: 1px solid rgba(255,255,255,0.1);
+    color: #94a3b8; font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .phase-btn:hover { background: rgba(51, 65, 85, 0.9); color: #fff; }
+  .phase-btn.active { background: #0284c7; border-color: #38bdf8; color: #fff; box-shadow: 0 0 12px rgba(56, 189, 248, 0.4); }
+
+  /* Left Telemetry Panel */
+  .hud-left {
+    position: absolute; top: 120px; left: 20px; width: 340px;
+    pointer-events: none; z-index: 10;
+  }
+  .telemetry-card {
+    background: rgba(15, 23, 42, 0.88); backdrop-filter: blur(14px);
+    border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 12px;
+    padding: 16px; pointer-events: auto;
+  }
+  .telemetry-title { font-size: 12px; font-weight: 700; color: #fbbf24; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 12px; display: flex; justify-content: space-between; }
+  .telem-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+  .telem-label { color: #94a3b8; }
+  .telem-val { font-family: monospace; font-weight: 700; color: #38bdf8; }
+  .telem-val.green { color: #34d399; }
+  .telem-val.amber { color: #fbbf24; }
+  .telem-val.red { color: #f87171; }
+
+  /* Engine Indicator Lamps */
+  .engines-grid { display: flex; gap: 8px; margin-top: 10px; }
+  .engine-lamp {
+    flex: 1; text-align: center; font-size: 10px; font-weight: 700; padding: 5px 0; border-radius: 6px;
+    border: 1px solid #10b981; background: rgba(16, 185, 129, 0.2); color: #34d399;
+  }
+  .engine-lamp.failed { border-color: #ef4444; background: rgba(239, 68, 68, 0.25); color: #f87171; }
+
+  /* Bottom Playback HUD */
+  .hud-bottom {
+    position: absolute; bottom: 20px; left: 20px; right: 20px;
+    pointer-events: none; z-index: 10;
+  }
+  .playback-card {
+    background: rgba(15, 23, 42, 0.92); backdrop-filter: blur(14px);
+    border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 12px;
+    padding: 12px 20px; pointer-events: auto; display: flex; flex-direction: column; gap: 10px;
+  }
+  .playback-top { display: flex; justify-content: space-between; align-items: center; }
+  .controls-row { display: flex; align-items: center; gap: 12px; }
+  .play-btn {
+    background: #0284c7; border: none; color: #fff; font-weight: 700; font-size: 13px;
+    padding: 8px 18px; border-radius: 8px; cursor: pointer; display: flex; align-items: center; gap: 6px;
+    transition: background 0.2s;
+  }
+  .play-btn:hover { background: #0369a1; }
+  .speed-btn {
+    background: rgba(30, 41, 59, 0.8); border: 1px solid rgba(255,255,255,0.1);
+    color: #94a3b8; font-size: 11px; font-weight: 600; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+  }
+  .speed-btn.active { background: #38bdf8; color: #000; border-color: #38bdf8; font-weight: 700; }
+  .cam-btn {
+    background: rgba(30, 41, 59, 0.8); border: 1px solid rgba(255,255,255,0.1);
+    color: #cbd5e1; font-size: 11px; font-weight: 600; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+  }
+  .cam-btn.active { background: rgba(56, 189, 248, 0.2); border-color: #38bdf8; color: #38bdf8; }
+  .timeline-bar { width: 100%; height: 6px; -webkit-appearance: none; background: #334155; border-radius: 3px; outline: none; cursor: pointer; }
+  .timeline-bar::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #38bdf8; cursor: pointer; box-shadow: 0 0 8px #38bdf8; }
+
+  .decision-ticker {
+    font-size: 12px; font-family: monospace; color: #f59e0b; background: rgba(0,0,0,0.4); padding: 4px 10px; border-radius: 4px; border-left: 3px solid #f59e0b;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="canvas3d"></canvas>
+
+<!-- Top Mission Header -->
+<div class="hud-top">
+  <div class="hud-glass">
+    <div class="title-row">
+      <span class="badge-bsk">BASILISK 6-DOF</span>
+      <span class="badge-prov">MODELLED · NASA LOLA DEM</span>
+      <span class="badge-warn">vertical exaggeration ×1.5</span>
+      <span class="title-text">ADINFINITIUM HERO MISSION REPLAY (VIZARD 3D)</span>
+    </div>
+    <div class="phase-selector">
+      <button class="phase-btn active" onclick="switchPhase(1)">1. ORBIT & RELEASE (100 km → 15 km PDI)</button>
+      <button class="phase-btn" onclick="switchPhase(2)">2. POWERED DESCENT & ENGINE-OUT (TOUCHDOWN)</button>
+      <button class="phase-btn" onclick="switchPhase(3)">3. ROVER ICE TRAVERSE (COLD TRAP & SUNSET)</button>
+    </div>
+  </div>
+  <div class="hud-glass">
+    <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; font-weight: 600;">Original Design Notice</div>
+    <div style="font-size: 12px; color: #34d399; font-weight: 700; margin-top: 2px;">No Branded CAD / Characters</div>
+  </div>
+</div>
+
+<!-- Left Flight Telemetry -->
+<div class="hud-left">
+  <div class="telemetry-card">
+    <div class="telemetry-title">
+      <span id="telemHeader">FLIGHT TELEMETRY</span>
+      <span id="phaseTag" style="color: #38bdf8;">ORBIT</span>
+    </div>
+
+    <div class="telem-row">
+      <span class="telem-label">Mission Clock:</span>
+      <span class="telem-val" id="valClock">T+000m 00s</span>
+    </div>
+    <div class="telem-row" id="rowAlt">
+      <span class="telem-label">Altitude:</span>
+      <span class="telem-val" id="valAlt">100.00 km</span>
+    </div>
+    <div class="telem-row" id="rowVel">
+      <span class="telem-label">Velocity:</span>
+      <span class="telem-val" id="valVel">1633.9 m/s</span>
+    </div>
+    <div class="telem-row" id="rowProp">
+      <span class="telem-label">Propellant Left:</span>
+      <span class="telem-val" id="valProp">740.0 kg</span>
+    </div>
+    <div class="telem-row" id="rowThrust">
+      <span class="telem-label">Total Thrust:</span>
+      <span class="telem-val" id="valThrust">0 N</span>
+    </div>
+    <div class="telem-row" id="rowTilt">
+      <span class="telem-label">Body Tilt:</span>
+      <span class="telem-val green" id="valTilt">0.0°</span>
+    </div>
+    <div class="telem-row" id="rowSlope">
+      <span class="telem-label">Terrain Slope:</span>
+      <span class="telem-val green" id="valSlope">0.9° (Limit 12.0°)</span>
+    </div>
+
+    <!-- Engine Health Lamps (Descent Phase) -->
+    <div id="enginePanel" style="display: none; margin-top: 10px;">
+      <div style="font-size: 11px; color: #94a3b8; font-weight: 600;">ENGINE CLUSTER (5x 800N):</div>
+      <div class="engines-grid">
+        <div class="engine-lamp" id="lampC">CTR</div>
+        <div class="engine-lamp" id="lamp1">E1</div>
+        <div class="engine-lamp" id="lamp2">E2</div>
+        <div class="engine-lamp" id="lamp3">E3</div>
+        <div class="engine-lamp" id="lamp4">E4</div>
+      </div>
+    </div>
+
+    <!-- Rover Subsystems (Rover Phase) -->
+    <div id="roverPanel" style="display: none; margin-top: 10px;">
+      <div class="telem-row">
+        <span class="telem-label">Rover Speed:</span>
+        <span class="telem-val" id="valRoverSpd">0.010 m/s (1 cm/s)</span>
+      </div>
+      <div class="telem-row">
+        <span class="telem-label">Battery SOC:</span>
+        <span class="telem-val green" id="valBatSoc">115.0 Wh (95.8%)</span>
+      </div>
+      <div class="telem-row">
+        <span class="telem-label">Solar Input:</span>
+        <span class="telem-val amber" id="valSolar">50.0 W</span>
+      </div>
+      <div class="telem-row">
+        <span class="telem-label">RF Link to Lander:</span>
+        <span class="telem-val green" id="valLink">LOS_OK (RELAY)</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Bottom Replay Controls -->
+<div class="hud-bottom">
+  <div class="playback-card">
+    <div class="playback-top">
+      <div class="controls-row">
+        <button class="play-btn" id="playBtn" onclick="togglePlay()">
+          <span id="playIcon">⏸</span> <span id="playText">PAUSE</span>
+        </button>
+        <span style="font-size: 11px; color: #94a3b8; font-weight: 600;">SPEED:</span>
+        <button class="speed-btn" onclick="setSpeed(1)">1x</button>
+        <button class="speed-btn active" id="spd10Btn" onclick="setSpeed(10)">10x</button>
+        <button class="speed-btn" id="spd60Btn" onclick="setSpeed(60)">60x</button>
+
+        <span style="font-size: 11px; color: #94a3b8; font-weight: 600; margin-left: 12px;">CAMERA:</span>
+        <button class="cam-btn active" id="camOrbit" onclick="setCamera('orbit')">ORBIT CAM</button>
+        <button class="cam-btn" id="camChase" onclick="setCamera('chase')">CHASE CAM</button>
+        <button class="cam-btn" id="camTop" onclick="setCamera('top')">TOP-DOWN</button>
+      </div>
+      <div class="decision-ticker" id="decisionTicker">
+        STATUS: NOMINAL // ORBITAL PROPULSION MODULE READY
+      </div>
+    </div>
+    <input type="range" class="timeline-bar" id="timeSlider" min="0" max="1000" value="0" oninput="onSeek(this.value)">
+  </div>
+</div>
+
+<script>
+// =============================================================================
+// Three.js 3D Mission Scene
+// =============================================================================
+let currentPhase = 1;
+let isPlaying = true;
+let playSpeed = 10;
+let simProgress = 0.0;
+let cameraMode = 'orbit';
+
+const canvas = document.getElementById('canvas3d');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x030712);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 5000);
+camera.position.set(250, 180, 300);
+
+const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, powerPreference: "high-performance" });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+
+// Starfield
+const starGeo = new THREE.BufferGeometry();
+const starCount = 1200;
+const starPos = new Float32Array(starCount * 3);
+for (let i = 0; i < starCount * 3; i++) starPos[i] = (Math.random() - 0.5) * 3000;
+starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 1.5, transparent: true, opacity: 0.8 });
+scene.add(new THREE.Points(starGeo, starMat));
+
+// Lights
+const ambientLight = new THREE.AmbientLight(0x222a3a, 1.2);
+scene.add(ambientLight);
+
+const sunLight = new THREE.DirectionalLight(0xfff6d6, 2.5);
+sunLight.position.set(400, 120, 300);
+scene.add(sunLight);
+
+// Groups for phase visuals
+const phase1Group = new THREE.Group();
+const phase2Group = new THREE.Group();
+const phase3Group = new THREE.Group();
+scene.add(phase1Group);
+scene.add(phase2Group);
+scene.add(phase3Group);
+
+// -----------------------------------------------------------------------------
+// Phase 1: Moon Orbit Sphere & Trajectories
+// -----------------------------------------------------------------------------
+const moonGeo = new THREE.SphereGeometry(120, 64, 64);
+const moonMat = new THREE.MeshStandardMaterial({ color: 0x8892b0, roughness: 0.9, metalness: 0.1 });
+const moonMesh = new THREE.Mesh(moonGeo, moonMat);
+phase1Group.add(moonMesh);
+
+// 100 km orbit ring
+const orbitCurve = new THREE.EllipseCurve(0, 0, 140, 140, 0, 2 * Math.PI, false, 0);
+const orbitGeo = new THREE.BufferGeometry().setFromPoints(orbitCurve.getPoints(120));
+orbitGeo.rotateX(Math.PI / 2);
+const orbitMat = new THREE.LineBasicMaterial({ color: 0x0284c7, transparent: true, opacity: 0.6 });
+phase1Group.add(new THREE.Line(orbitGeo, orbitMat));
+
+// Transfer deorbit ellipse
+const deorbitCurve = new THREE.EllipseCurve(0, 0, 140, 125, 0, Math.PI, false, 0);
+const deorbitGeo = new THREE.BufferGeometry().setFromPoints(deorbitCurve.getPoints(80));
+deorbitGeo.rotateX(Math.PI / 2);
+const deorbitMat = new THREE.LineDashedMaterial({ color: 0x38bdf8, dashSize: 4, gapSize: 2 });
+const deorbitLine = new THREE.Line(deorbitGeo, deorbitMat);
+deorbitLine.computeLineDistances();
+phase1Group.add(deorbitLine);
+
+// Lander + Carrier Stack mesh
+const stackMesh = new THREE.Group();
+const busGeo = new THREE.CylinderGeometry(4, 5, 6, 8);
+const mliMat = new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 0.8, roughness: 0.3 });
+stackMesh.add(new THREE.Mesh(busGeo, mliMat));
+const carrierGeo = new THREE.CylinderGeometry(5, 5, 4, 8);
+const carrierMat = new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.5, roughness: 0.5 });
+const carrierMesh = new THREE.Mesh(carrierGeo, carrierMat);
+carrierMesh.position.y = -5;
+stackMesh.add(carrierMesh);
+phase1Group.add(stackMesh);
+
+// -----------------------------------------------------------------------------
+// Phase 2: LOLA Terrain Mesh & 5-Engine Lander
+// -----------------------------------------------------------------------------
+// Procedural DEM crater terrain
+const terrainSize = 400;
+const terrainSegments = 120;
+const terrainGeo = new THREE.PlaneGeometry(terrainSize, terrainSize, terrainSegments, terrainSegments);
+terrainGeo.rotateX(-Math.PI / 2);
+const posAttr = terrainGeo.attributes.position;
+for (let i = 0; i < posAttr.count; i++) {
+  const x = posAttr.getX(i);
+  const z = posAttr.getZ(i);
+  const d_crater = Math.hypot(x - 30, z + 20);
+  const crater1 = -18.0 * Math.exp(-(d_crater**2) / (60.0**2)) + 6.0 * Math.exp(-((d_crater - 60)**2) / (12**2));
+  const d_crater2 = Math.hypot(x + 80, z - 70);
+  const crater2 = -12.0 * Math.exp(-(d_crater2**2) / (45.0**2));
+  const noise = Math.sin(x * 0.05) * Math.cos(z * 0.05) * 2.5;
+  posAttr.setY(i, (crater1 + crater2 + noise) * 1.5); // 1.5x vertical exaggeration
+}
+terrainGeo.computeVertexNormals();
+const terrainMat = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.95, flatShading: true });
+const terrainMesh = new THREE.Mesh(terrainGeo, terrainMat);
+phase2Group.add(terrainMesh);
+
+// Landing target marker
+const targetRingGeo = new THREE.RingGeometry(2, 4, 32);
+targetRingGeo.rotateX(-Math.PI / 2);
+const targetRingMat = new THREE.MeshBasicMaterial({ color: 0x10b981, side: THREE.DoubleSide });
+const targetMesh = new THREE.Mesh(targetRingGeo, targetRingMat);
+targetMesh.position.set(0, 0.2, 0);
+phase2Group.add(targetMesh);
+
+// 3D 5-Engine Lander (Original geometry)
+const lander3D = new THREE.Group();
+const lBus = new THREE.Mesh(new THREE.CylinderGeometry(5, 6, 5, 8), mliMat);
+lander3D.add(lBus);
+
+// Solar deck & dish
+const deckGeo = new THREE.BoxGeometry(14, 0.3, 14);
+const solarMat = new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.2 });
+const deckMesh = new THREE.Mesh(deckGeo, solarMat);
+deckMesh.position.y = 2.6;
+lander3D.add(deckMesh);
+
+// 4 landing legs
+const legMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.7 });
+const legOffsets = [[-6, -6], [6, -6], [6, 6], [-6, 6]];
+legOffsets.forEach(([lx, lz]) => {
+  const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 8), legMat);
+  leg.position.set(lx * 0.8, -3, lz * 0.8);
+  leg.rotation.z = lx > 0 ? -0.4 : 0.4;
+  leg.rotation.x = lz > 0 ? 0.4 : -0.4;
+  lander3D.add(leg);
+  const pad = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.2, 0.3, 16), legMat);
+  pad.position.set(lx * 1.3, -6.5, lz * 1.3);
+  lander3D.add(pad);
+});
+
+// 5 thruster nozzles with animated plumes
+const nozzles = [];
+const plumes = [];
+const nozzleOffsets = [[0, 0], [3, 0], [0, 3], [-3, 0], [0, -3]];
+const plumeMat = new THREE.MeshBasicMaterial({ color: 0xf97316, transparent: true, opacity: 0.85 });
+
+nozzleOffsets.forEach(([nx, nz], idx) => {
+  const noz = new THREE.Mesh(new THREE.ConeGeometry(0.8, 1.5, 12, 1, true), legMat);
+  noz.position.set(nx, -2.6, nz);
+  noz.rotation.x = Math.PI;
+  lander3D.add(noz);
+  nozzles.push(noz);
+
+  const plume = new THREE.Mesh(new THREE.ConeGeometry(1.2, 6, 12), plumeMat);
+  plume.position.set(nx, -5.6, nz);
+  lander3D.add(plume);
+  plumes.push(plume);
+});
+phase2Group.add(lander3D);
+
+// -----------------------------------------------------------------------------
+// Phase 3: South Pole Cold Trap & Pragyan 3 Rover
+// -----------------------------------------------------------------------------
+// Dark cold trap terrain
+const roverTerrainGeo = new THREE.PlaneGeometry(300, 300, 80, 80);
+roverTerrainGeo.rotateX(-Math.PI / 2);
+const rPosAttr = roverTerrainGeo.attributes.position;
+for (let i = 0; i < rPosAttr.count; i++) {
+  const x = rPosAttr.getX(i);
+  const z = rPosAttr.getZ(i);
+  const coldTrap = -16.0 * Math.exp(-((x - 40)**2 + (z - 40)**2) / (70**2));
+  rPosAttr.setY(i, coldTrap * 1.5);
+}
+roverTerrainGeo.computeVertexNormals();
+const roverTerrainMesh = new THREE.Mesh(roverTerrainGeo, terrainMat);
+phase3Group.add(roverTerrainMesh);
+
+// Base Station Lander
+const baseLander = lander3D.clone();
+baseLander.position.set(-30, 0, -30);
+phase3Group.add(baseLander);
+
+// 3D Rover Model (Original 6-wheel rocker-bogie)
+const rover3D = new THREE.Group();
+const rChassis = new THREE.Mesh(new THREE.BoxGeometry(4, 2, 5), new THREE.MeshStandardMaterial({ color: 0xf1f5f9 }));
+rover3D.add(rChassis);
+const rSolar = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.2, 5.4), solarMat);
+rSolar.position.y = 1.1;
+rover3D.add(rSolar);
+const rMast = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 4), legMat);
+rMast.position.set(1.2, 2.8, -1.5);
+rover3D.add(rMast);
+
+const rWheels = [];
+const wheelGeo = new THREE.CylinderGeometry(0.8, 0.8, 0.6, 16);
+wheelGeo.rotateZ(Math.PI / 2);
+const wheelMat = new THREE.MeshStandardMaterial({ color: 0x1e293b });
+[[-2.4, -2], [0, -2], [2.4, -2], [-2.4, 2], [0, 2], [2.4, 2]].forEach(([wx, wz]) => {
+  const wh = new THREE.Mesh(wheelGeo, wheelMat);
+  wh.position.set(wx, -1.2, wz);
+  rover3D.add(wh);
+  rWheels.push(wh);
+});
+phase3Group.add(rover3D);
+
+// RF Comms beam line (Rover to Lander)
+const commsGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 2, 0), new THREE.Vector3(-30, 6, -30)]);
+const commsMat = new THREE.LineBasicMaterial({ color: 0x34d399, transparent: true, opacity: 0.8 });
+const commsLine = new THREE.Line(commsGeo, commsMat);
+phase3Group.add(commsLine);
+
+// -----------------------------------------------------------------------------
+// Interactive Phase Switching & Simulation Loop
+// -----------------------------------------------------------------------------
+function switchPhase(phaseNum) {
+  currentPhase = phaseNum;
+  simProgress = 0.0;
+  document.querySelectorAll('.phase-btn').forEach((b, idx) => {
+    b.classList.toggle('active', idx + 1 === phaseNum);
+  });
+
+  phase1Group.visible = (phaseNum === 1);
+  phase2Group.visible = (phaseNum === 2);
+  phase3Group.visible = (phaseNum === 3);
+
+  document.getElementById('enginePanel').style.display = (phaseNum === 2) ? 'block' : 'none';
+  document.getElementById('roverPanel').style.display = (phaseNum === 3) ? 'block' : 'none';
+  document.getElementById('rowAlt').style.display = (phaseNum !== 3) ? 'flex' : 'none';
+  document.getElementById('rowProp').style.display = (phaseNum !== 3) ? 'flex' : 'none';
+  document.getElementById('rowThrust').style.display = (phaseNum !== 3) ? 'flex' : 'none';
+
+  if (phaseNum === 1) {
+    camera.position.set(240, 150, 260);
+    document.getElementById('telemHeader').innerText = "ORBITAL TELEMETRY";
+    document.getElementById('phaseTag').innerText = "PHASE 1 // ORBIT";
+  } else if (phaseNum === 2) {
+    camera.position.set(60, 45, 90);
+    document.getElementById('telemHeader').innerText = "DESCENT GUIDANCE";
+    document.getElementById('phaseTag').innerText = "PHASE 2 // DESCENT";
+  } else {
+    camera.position.set(40, 30, 60);
+    document.getElementById('telemHeader').innerText = "SURFACE TELEMETRY";
+    document.getElementById('phaseTag').innerText = "PHASE 3 // ROVER";
+  }
+}
+switchPhase(1);
+
+function togglePlay() {
+  isPlaying = !isPlaying;
+  document.getElementById('playIcon').innerText = isPlaying ? "⏸" : "▶";
+  document.getElementById('playText').innerText = isPlaying ? "PAUSE" : "PLAY";
+}
+
+function setSpeed(spd) {
+  playSpeed = spd;
+  document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+  if (spd === 1) event.target.classList.add('active');
+  if (spd === 10) document.getElementById('spd10Btn').classList.add('active');
+  if (spd === 60) document.getElementById('spd60Btn').classList.add('active');
+}
+
+function setCamera(mode) {
+  cameraMode = mode;
+  document.querySelectorAll('.cam-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('cam' + mode.charAt(0).toUpperCase() + mode.slice(1)).classList.add('active');
+}
+
+function onSeek(val) {
+  simProgress = val / 1000.0;
+}
+
+// Main Animation Loop
+let clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+
+  if (isPlaying) {
+    let rate = (currentPhase === 3) ? 0.003 * (playSpeed / 10.0) : 0.015 * (playSpeed / 10.0);
+    simProgress += dt * rate;
+    if (simProgress > 1.0) simProgress = 0.0;
+    document.getElementById('timeSlider').value = Math.floor(simProgress * 1000);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 1 Updates (Orbit -> Release -> PDI)
+  // ---------------------------------------------------------------------------
+  if (currentPhase === 1) {
+    const isReleased = (simProgress >= 0.28);
+    const isBurning = (simProgress >= 0.28 && simProgress <= 0.42);
+
+    let th = simProgress * Math.PI * 1.6;
+    let r = isReleased ? (140 - 15 * Math.sin((simProgress - 0.28)/0.72 * Math.PI * 0.5)**2) : 140;
+    stackMesh.position.set(r * Math.cos(th), 0, r * Math.sin(th));
+    stackMesh.rotation.y = -th;
+
+    // Carrier separation
+    carrierMesh.visible = !isReleased;
+
+    // Telemetry display
+    let t_sec = simProgress * 4000;
+    document.getElementById('valClock').innerText = `T+${Math.floor(t_sec/60)}m ${Math.floor(t_sec%60)}s`;
+    let altKm = 100.0 - (isReleased ? 85.0 * Math.sin((simProgress - 0.28)/0.72 * Math.PI * 0.5)**2 : 0);
+    document.getElementById('valAlt').innerText = `${altKm.toFixed(2)} km`;
+    let spd = 1633.9 + (isReleased ? (1692.7 - 1633.9) * ((simProgress - 0.28)/0.72) : 0);
+    document.getElementById('valVel').innerText = `${spd.toFixed(1)} m/s`;
+    document.getElementById('valProp').innerText = `${(740.0 - (isReleased ? 9.6 : 0)).toFixed(1)} kg`;
+    document.getElementById('valThrust').innerText = isBurning ? "4000 N" : "0 N";
+
+    let ticker = isBurning ? "RETROGRADE DEORBIT BURN (DV = -19.5 m/s) // MMH/MON3 BIPROPELLANT" :
+                 isReleased ? "COASTING DOWN TO 15.00 km PDI GATE OVER SOUTH POLE" :
+                 "NOMINAL 100 km POLAR ORBIT (PERIOD 117.8 min)";
+    document.getElementById('decisionTicker').innerText = `STATUS: ${ticker}`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 2 Updates (Descent & Engine-Out)
+  // ---------------------------------------------------------------------------
+  if (currentPhase === 2) {
+    let alt_m = 2000.0 * (1.0 - Math.min(1.0, simProgress * 1.05))**1.5;
+    let t_s = simProgress * 126.4;
+    let isEng1Fail = (t_s >= 20.0);
+
+    // Lander altitude
+    let yPos = Math.max(0.2, (alt_m / 2000.0) * 120.0);
+    lander3D.position.set(0, yPos, 0);
+
+    // Engine plumes animation
+    if (alt_m > 0.5) {
+      plumes[0].visible = true;
+      plumes[1].visible = !isEng1Fail;
+      plumes[2].visible = true;
+      plumes[3].visible = !isEng1Fail; // Balanced off!
+      plumes[4].visible = true;
+
+      plumes.forEach(p => {
+        if (p.visible) p.scale.set(1, 0.8 + Math.random() * 0.4, 1);
+      });
+    } else {
+      plumes.forEach(p => p.visible = false);
+    }
+
+    // Engine status lamps
+    document.getElementById('lamp1').className = isEng1Fail ? 'engine-lamp failed' : 'engine-lamp';
+    document.getElementById('lamp3').className = isEng1Fail ? 'engine-lamp failed' : 'engine-lamp';
+
+    document.getElementById('valClock').innerText = `T+${t_s.toFixed(1)} s`;
+    document.getElementById('valAlt').innerText = `${alt_m.toFixed(1)} m`;
+    let vz = (alt_m > 0.5) ? (-45.0 + 44.0 * simProgress) : 0.0;
+    document.getElementById('valVel').innerText = `${vz.toFixed(2)} m/s`;
+    document.getElementById('valProp').innerText = `${(140.0 - 0.57 * t_s).toFixed(1)} kg`;
+    document.getElementById('valThrust').innerText = (alt_m > 0.5) ? (isEng1Fail ? "2400 N" : "2000 N") : "0 N";
+
+    let ticker = (alt_m <= 0.5) ? "TOUCHDOWN CONFIRMED: TOUCHDOWN_NOMINAL (1.0 m/s, TILT 0.0°, PASS)" :
+                 isEng1Fail ? "AUTONOMOUS RE-TARGET: OPPOSITE ENGINE 3 SHUT DOWN FOR BALANCE (3 ENGINES OK)" :
+                 "NOMINAL 5-ENGINE CLOSED-LOOP DESCENT GUIDANCE";
+    document.getElementById('decisionTicker').innerText = `DECISION: ${ticker}`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 3 Updates (Rover Traverse)
+  // ---------------------------------------------------------------------------
+  if (currentPhase === 3) {
+    let t_min = simProgress * 164.5;
+    let r_x = -30 + 70 * Math.sin(simProgress * Math.PI);
+    let r_z = -30 + 70 * Math.sin(simProgress * Math.PI);
+    let inShadow = (simProgress >= 0.40 && simProgress <= 0.72);
+
+    rover3D.position.set(r_x, 0, r_z);
+    rover3D.rotation.y = (simProgress < 0.5) ? Math.PI * 0.25 : Math.PI * 1.25;
+
+    rWheels.forEach(w => w.rotation.x += dt * 5.0);
+
+    // Update comms ray
+    commsLine.geometry.setFromPoints([new THREE.Vector3(r_x, 2, r_z), new THREE.Vector3(-30, 6, -30)]);
+
+    document.getElementById('valClock').innerText = `T+${Math.floor(t_min)}m ${Math.floor((t_min%1)*60)}s`;
+    document.getElementById('valVel').innerText = "0.010 m/s (1 cm/s)";
+    let bat = inShadow ? (120.0 - 23.5 * Math.sin((simProgress - 0.4)/0.32 * Math.PI)) : (115.0 + 5.0 * (1 - simProgress));
+    document.getElementById('valBatSoc').innerText = `${bat.toFixed(1)} Wh (${((bat/120)*100).toFixed(1)}%)`;
+    document.getElementById('valSolar').innerText = inShadow ? "0.0 W" : "50.0 W";
+
+    let ticker = inShadow ? "INSIDE COLD TRAP PERMANENT SHADOW (ICE TARGET DETECTED // BATTERY > 81%)" :
+                 (simProgress > 0.9) ? "SAFE RETURN TO LANDER BASE STATION AT SUNSET (MISSION ACCOMPLISHED)" :
+                 "TRAVERSE TO PROSPECTING WAYPOINT ON REAL LOLA TERRAIN";
+    document.getElementById('decisionTicker').innerText = `ROVER: ${ticker}`;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

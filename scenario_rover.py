@@ -33,6 +33,7 @@ import numpy as np
 
 from basilisk_mods.lunar_terrain import LunarTerrain, ps_from_moon_fixed
 from basilisk_mods.rover import LunarRover, RoverConfig, export_rover_vizard_mesh
+from basilisk_mods import viz_support
 
 
 def run_rover_scenario(
@@ -131,6 +132,30 @@ def run_rover_scenario(
         print(f"  WP 3 (Return to Lander):        ({wp3_x_m:.1f} m, {wp3_y_m:.1f} m)")
         print("=" * 76)
 
+    runs_dir = Path("runs/basilisk")
+    runs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Initialize Vizard 3D replay recorder
+    vizard_rec = viz_support.enableUnityVisualization(
+        sim=None,
+        taskName="roverTask",
+        scList=None,
+        saveFile=runs_dir / f"rover_{rover_id}",
+    )
+    rover_obj = Path("vizard/rover_body.obj")
+    if rover_obj.exists():
+        viz_support.createCustomModel(vizard_rec, modelPath=str(rover_obj), simBodiesToModify=["rover"], scale=[1.0, 1.0, 1.0])
+    lander_obj = Path("vizard/lander_body.obj")
+    if lander_obj.exists():
+        viz_support.createCustomModel(vizard_rec, modelPath=str(lander_obj), simBodiesToModify=["lander"], scale=[1.0, 1.0, 1.0])
+    terrain_obj = Path("vizard/terrain_shackleton.obj") if region != "demo_craters" else Path("vizard/terrain_demo_craters.obj")
+    if not terrain_obj.exists():
+        terrain_obj = Path("vizard/terrain_demo_craters.obj")
+    if terrain_obj.exists():
+        viz_support.createCustomModel(vizard_rec, modelPath=str(terrain_obj), simBodiesToModify=["terrain"], scale=[1.0, 1.0, 1.0])
+    viz_support.createPointLine(vizard_rec, fromBodyName="rover", toBodyName="lander", lineColor=[40, 255, 60, 255])
+    viz_support.createPointLine(vizard_rec, toBodyName="sun_planet_data", lineColor="yellow")
+
     # Simulation loop
     max_sim_steps = 1000
     step_count = 0
@@ -153,6 +178,28 @@ def run_rover_scenario(
         elif shadow_entered and state.sun_fraction > 0.5:
             shadow_exited = True
 
+        # Record Vizard frame
+        h_rad = math.radians(state.heading_deg)
+        mrp_r = [0.0, 0.0, math.tan(h_rad / 4.0)]
+        vizard_rec.record_frame(
+            time_s=state.time_s,
+            bodies_state={
+                "rover": {
+                    "r_m": [state.x_m, state.y_m, state.z_m],
+                    "v_m_s": [state.speed_mps * math.cos(h_rad), state.speed_mps * math.sin(h_rad), 0.0],
+                    "mrp": mrp_r,
+                },
+                "lander": {
+                    "r_m": [lander_x_m, lander_y_m, lander_h_m],
+                    "v_m_s": [0.0, 0.0, 0.0],
+                    "mrp": [0.0, 0.0, 0.0],
+                }
+            },
+            thrusters=[],
+            sun_direction=[0.0, 1.0, 0.0],
+            notes=f"Bat: {state.battery_pct:.1f}% | Link: {'LOS_OK' if state.has_los_link else 'OCCLUDED'}",
+        )
+
         if verbose and (step_count % 10 == 0 or rover.is_returned):
             print(f"t={state.time_s/60.0:5.1f} min | Pos: ({state.x_m - lander_x_m:+5.1f}m, {state.y_m - lander_y_m:+5.1f}m) | "
                   f"Dist to Lander: {state.distance_to_lander_m:4.1f}m | Bat: {state.battery_wh:5.1f}Wh ({state.battery_pct:4.1f}%) | "
@@ -166,6 +213,7 @@ def run_rover_scenario(
 
     # Export Vizard 3D models and motion replay path
     export_rover_vizard_mesh("vizard/rover_body.obj")
+    bin_p, json_p = vizard_rec.save()
 
     vizard_path_file = runs_dir / f"rover_{rover_id}_vizard.csv"
     with open(vizard_path_file, "w", newline="", encoding="utf-8") as f:

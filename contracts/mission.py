@@ -51,6 +51,7 @@ class TouchdownLimits(_Strict):
 class Lander(_Strict):
     wet_mass_at_release_kg: float = Field(gt=0)
     dry_mass_kg: float = Field(gt=0)
+    propulsion_module_mass_kg: float = Field(default=900.0, gt=0)
     isp_s: float = Field(gt=0)
     engines: Engines
     max_tilt_deg: float = Field(ge=0, le=90)

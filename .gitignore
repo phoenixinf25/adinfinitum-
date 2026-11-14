@@ -84,3 +84,6 @@ build/
 # Exclude Basilisk CI workflows (requires 'workflow' PAT scope)
 .github/workflows/
 .github/actions/
+
+# Mission simulation runs output (big runtime files travel by pen drive)
+runs/

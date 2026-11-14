@@ -17,6 +17,7 @@ moon:
 lander:
   wet_mass_at_release_kg: 1500.0     # assumption; Chandrayaan-3 lander was 1,752 kg
   dry_mass_kg: 760.0                 # assumption; leaves ~740 kg propellant at release
+  propulsion_module_mass_kg: 900.0   # carrier dry mass at lunar orbit (KAN-41)
   isp_s: 310.0                       # MMH/MON3 bipropellant family (300–315 s)
   engines:
     count: 5                         # 4 outer + 1 centre
