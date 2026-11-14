@@ -1,0 +1,890 @@
+/*
+ ISC License
+
+ Copyright (c) 2022, Autonomous Vehicle Systems Lab, University of Colorado at Boulder
+
+ Permission to use, copy, modify, and/or distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+ */
+
+#include "spinningBodyTwoDOFStateEffector.h"
+#include "architecture/messaging/ownedMessage.h"
+#include "architecture/utilities/avsEigenSupport.h"
+#include "architecture/utilities/rigidBodyKinematics.h"
+#include <cmath>
+#include <string>
+
+/*! This is the constructor, setting variables to default values */
+SpinningBodyTwoDOFStateEffector::SpinningBodyTwoDOFStateEffector()
+{
+    for (size_t bodyIndex = 0; bodyIndex < 2; ++bodyIndex) {
+        addOwnedMessage(this->ownedSpinningBodyOutMsgs, this->spinningBodyOutMsgs);
+        addOwnedMessage(this->ownedSpinningBodyConfigLogOutMsgs, this->spinningBodyConfigLogOutMsgs);
+    }
+
+    // Zero the mass props and mass prop rates contributions
+    this->effProps.mEff = 0.0;
+    this->effProps.rEff_CB_B.fill(0.0);
+    this->effProps.IEffPntB_B.fill(0.0);
+    this->effProps.rEffPrime_CB_B.fill(0.0);
+    this->effProps.IEffPrimePntB_B.fill(0.0);
+
+    // Initialize variables to working values
+    this->IS1PntSc1_S1.setIdentity();
+    this->IS2PntSc2_S2.setIdentity();
+    this->dcm_S10B.setIdentity();
+    this->dcm_S20S1.setIdentity();
+    this->ATheta.setZero();
+    this->BTheta.setZero();
+    this->rTilde_Sc1B_B.setZero();
+    this->rTilde_Sc2B_B.setZero();
+    this->omegaTilde_S1B_B.setZero();
+    this->omegaTilde_S2B_B.setZero();
+    this->dcm_BS1.setIdentity();
+    this->dcm_BS2.setIdentity();
+    this->dcm_BN.setIdentity();
+    this->IS1PntSc1_B.setIdentity();
+    this->IS2PntSc2_B.setIdentity();
+    this->IPrimeS1PntSc1_B.setZero();
+    this->IPrimeS2PntSc2_B.setZero();
+
+    // Separate the axis and instance identifiers from single-axis effector names.
+    const std::string instance = "_" + std::to_string(SpinningBodyTwoDOFStateEffector::effectorID);
+    this->nameOfTheta1State = "spinningBodyTheta1" + instance;
+    this->nameOfTheta1DotState = "spinningBodyTheta1Dot" + instance;
+    this->nameOfTheta2State = "spinningBodyTheta2" + instance;
+    this->nameOfTheta2DotState = "spinningBodyTheta2Dot" + instance;
+    this->nameOfInertialPositionProperty1 = "spinningBodyInertialPosition1" + instance;
+    this->nameOfInertialVelocityProperty1 = "spinningBodyInertialVelocity1" + instance;
+    this->nameOfInertialAttitudeProperty1 = "spinningBodyInertialAttitude1" + instance;
+    this->nameOfInertialAngVelocityProperty1 = "spinningBodyInertialAngVelocity1" + instance;
+    this->nameOfInertialPositionProperty2 = "spinningBodyInertialPosition2" + instance;
+    this->nameOfInertialVelocityProperty2 = "spinningBodyInertialVelocity2" + instance;
+    this->nameOfInertialAttitudeProperty2 = "spinningBodyInertialAttitude2" + instance;
+    this->nameOfInertialAngVelocityProperty2 = "spinningBodyInertialAngVelocity2" + instance;
+    SpinningBodyTwoDOFStateEffector::effectorID++;
+}
+
+uint64_t SpinningBodyTwoDOFStateEffector::effectorID = 1;
+
+/*! This is the destructor, nothing to report here */
+SpinningBodyTwoDOFStateEffector::~SpinningBodyTwoDOFStateEffector() = default;
+
+/*! This method validates the module configuration when the scheduler resets the model.
+
+ @param CurrentClock [ns] Time at which the reset occurs
+ */
+void SpinningBodyTwoDOFStateEffector::Reset(uint64_t CurrentClock [[maybe_unused]])
+{
+    this->validateConfiguration();
+}
+
+/*! @brief Validate finite configuration values and normalize the configured spin axes. */
+void SpinningBodyTwoDOFStateEffector::validateConfiguration()
+{
+    const auto requireFinite = [this](double value, const char* name) {
+        if (!std::isfinite(value)) {
+            this->bskLogger.bskError("SpinningBodyTwoDOFStateEffector: %s must be finite.", name);
+        }
+    };
+    requireFinite(this->mass1, "mass1");
+    requireFinite(this->mass2, "mass2");
+    requireFinite(this->k1, "k1");
+    requireFinite(this->k2, "k2");
+    requireFinite(this->c1, "c1");
+    requireFinite(this->c2, "c2");
+    requireFinite(this->theta1Init, "theta1Init");
+    requireFinite(this->theta1DotInit, "theta1DotInit");
+    requireFinite(this->theta2Init, "theta2Init");
+    requireFinite(this->theta2DotInit, "theta2DotInit");
+    if (!this->s1Hat_S1.allFinite()) {
+        this->bskLogger.bskError("SpinningBodyTwoDOFStateEffector: s1Hat_S1 must contain only finite values.");
+    }
+    if (!this->s2Hat_S2.allFinite()) {
+        this->bskLogger.bskError("SpinningBodyTwoDOFStateEffector: s2Hat_S2 must contain only finite values.");
+    }
+    if (!this->r_S1B_B.allFinite()) {
+        this->bskLogger.bskError("SpinningBodyTwoDOFStateEffector: r_S1B_B must contain only finite values.");
+    }
+    if (!this->r_S2S1_S1.allFinite()) {
+        this->bskLogger.bskError("SpinningBodyTwoDOFStateEffector: r_S2S1_S1 must contain only finite values.");
+    }
+    if (!this->r_Sc1S1_S1.allFinite()) {
+        this->bskLogger.bskError("SpinningBodyTwoDOFStateEffector: r_Sc1S1_S1 must contain only finite values.");
+    }
+    if (!this->r_Sc2S2_S2.allFinite()) {
+        this->bskLogger.bskError("SpinningBodyTwoDOFStateEffector: r_Sc2S2_S2 must contain only finite values.");
+    }
+    if (!this->IS1PntSc1_S1.allFinite()) {
+        this->bskLogger.bskError("SpinningBodyTwoDOFStateEffector: IS1PntSc1_S1 must contain only finite values.");
+    }
+    if (!this->IS2PntSc2_S2.allFinite()) {
+        this->bskLogger.bskError("SpinningBodyTwoDOFStateEffector: IS2PntSc2_S2 must contain only finite values.");
+    }
+
+    // Retain the existing minimum spin-axis magnitudes.
+    if (this->s1Hat_S1.stableNorm() <= 0.01) {
+        bskLogger.bskError("Norm of s1Hat must be greater than 0. s1Hat may not have been set by the user.");
+    }
+
+    if (this->s2Hat_S2.stableNorm() <= 0.01) {
+        bskLogger.bskError("Norm of s2Hat must be greater than 0. s2Hat may not have been set by the user.");
+    }
+
+    // Verify the user-provided DCMs are proper rotations (orthogonal and right-handed)
+    if (!eigenIsRotationMatrix(this->dcm_S10B)) {
+        bskLogger.bskError("spinningBodyTwoDOFStateEffector: dcm_S10B is not a valid rotation matrix; it must be "
+                           "orthogonal and right-handed. It may not have been set properly by the user.");
+    }
+    if (!eigenIsRotationMatrix(this->dcm_S20S1)) {
+        bskLogger.bskError("spinningBodyTwoDOFStateEffector: dcm_S20S1 is not a valid rotation matrix; it must be "
+                           "orthogonal and right-handed. It may not have been set properly by the user.");
+    }
+
+    // Verify the masses are physically valid (non-negative). A zero mass is permitted (massless body).
+    if (this->mass1 < 0.0) {
+        bskLogger.bskError("spinningBodyTwoDOFStateEffector: mass1 must be greater than or equal to 0. It may not have "
+                           "been set properly by the user.");
+    }
+    if (this->mass2 < 0.0) {
+        bskLogger.bskError("spinningBodyTwoDOFStateEffector: mass2 must be greater than or equal to 0. It may not have "
+                           "been set properly by the user.");
+    }
+    const double totalMass = this->mass1 + this->mass2; // [kg]
+    if (!std::isfinite(totalMass)) {
+        bskLogger.bskError("spinningBodyTwoDOFStateEffector: combined mass must be finite.");
+    }
+
+    // Verify the inertia tensors are physically realizable (see eigenIsValidInertiaMatrix).
+    // A massless body legitimately carries a zero inertia tensor, so only check when its mass > 0.
+    if (this->mass1 > 0.0 && !eigenIsValidInertiaMatrix(this->IS1PntSc1_S1)) {
+        bskLogger.bskError("spinningBodyTwoDOFStateEffector: IS1PntSc1_S1 is not a valid inertia tensor. It may not "
+                           "have been set properly by the user.");
+    }
+    if (this->mass2 > 0.0 && !eigenIsValidInertiaMatrix(this->IS2PntSc2_S2)) {
+        bskLogger.bskError("spinningBodyTwoDOFStateEffector: IS2PntSc2_S2 is not a valid inertia tensor. It may not "
+                           "have been set properly by the user.");
+    }
+    // Scale internally to avoid overflowing the squared norm of finite axes.
+    this->s1Hat_S1 = (this->s1Hat_S1 / this->s1Hat_S1.cwiseAbs().maxCoeff()).normalized();
+    this->s2Hat_S2 = (this->s2Hat_S2 / this->s2Hat_S2.cwiseAbs().maxCoeff()).normalized();
+}
+
+/*! This method takes the computed theta states and outputs them to the messaging system.
+ *
+ * @param[in] CurrentClock [ns] Current simulation time.
+ */
+void SpinningBodyTwoDOFStateEffector::writeOutputStateMessages(uint64_t CurrentClock)
+{
+    this->computeSpinningBodyInertialStates();
+
+    // Write out the spinning body output messages
+    HingedRigidBodyMsgPayload spinningBodyBuffer;
+    if (this->spinningBodyOutMsgs[0]->isLinked()) {
+        spinningBodyBuffer = this->spinningBodyOutMsgs[0]->zeroMsgPayload;
+        spinningBodyBuffer.theta = this->theta1;
+        spinningBodyBuffer.thetaDot = this->theta1Dot;
+        this->spinningBodyOutMsgs[0]->write(&spinningBodyBuffer, this->moduleID, CurrentClock);
+    }
+    if (this->spinningBodyOutMsgs[1]->isLinked()) {
+        spinningBodyBuffer = this->spinningBodyOutMsgs[1]->zeroMsgPayload;
+        spinningBodyBuffer.theta = this->theta2;
+        spinningBodyBuffer.thetaDot = this->theta2Dot;
+        this->spinningBodyOutMsgs[1]->write(&spinningBodyBuffer, this->moduleID, CurrentClock);
+    }
+
+    // Write out the spinning body state config log message
+    if (this->spinningBodyConfigLogOutMsgs[0]->isLinked()) {
+        SCStatesMsgPayload configLogMsg;
+        configLogMsg = this->spinningBodyConfigLogOutMsgs[0]->zeroMsgPayload;
+
+        // Logging the S frame is the body frame B of that object
+        eigenVector3d2CArray((this->r_Sc1N_N), configLogMsg.r_BN_N);
+        eigenVector3d2CArray((this->v_Sc1N_N), configLogMsg.v_BN_N);
+        eigenMatrixXd2CArray((*this->sigma_S1N), configLogMsg.sigma_BN);
+        eigenMatrixXd2CArray((*this->omega_S1N_S1), configLogMsg.omega_BN_B);
+        this->spinningBodyConfigLogOutMsgs[0]->write(&configLogMsg, this->moduleID, CurrentClock);
+    }
+
+    if (this->spinningBodyConfigLogOutMsgs[1]->isLinked()) {
+        SCStatesMsgPayload configLogMsg;
+        configLogMsg = this->spinningBodyConfigLogOutMsgs[1]->zeroMsgPayload;
+
+        // Logging the S frame is the body frame B of that object
+        eigenVector3d2CArray(this->r_Sc2N_N, configLogMsg.r_BN_N);
+        eigenVector3d2CArray(this->v_Sc2N_N, configLogMsg.v_BN_N);
+        eigenMatrixXd2CArray(*this->sigma_S2N, configLogMsg.sigma_BN);
+        eigenMatrixXd2CArray(*this->omega_S2N_S2, configLogMsg.omega_BN_B);
+        this->spinningBodyConfigLogOutMsgs[1]->write(&configLogMsg, this->moduleID, CurrentClock);
+    }
+}
+
+/*! This method allows the SB state effector to have access to the hub states and gravity
+ *
+ * @param[in] states Dynamic parameter manager containing the required states.
+ */
+void SpinningBodyTwoDOFStateEffector::linkInStates(DynParamManager& states)
+{
+    // Get access to the hub's states needed for dynamic coupling
+    this->hubOmega = states.getStateObject("hubOmega");
+
+    this->inertialPositionProperty = states.getPropertyReference(this->propName_inertialPosition);
+    this->inertialVelocityProperty = states.getPropertyReference(this->propName_inertialVelocity);
+    // Prescribed attachments use the linked attitude property instead of a hub attitude state.
+    if (this->prescribedAttitudeProperty == nullptr) {
+        this->hubSigmaState = states.getStateObject(this->stateNameOfSigma);
+    }
+}
+
+/*! This method is used to link prescribed motion properties
+ *
+ * @param[in] states Dynamic parameter manager containing the required properties.
+ */
+void SpinningBodyTwoDOFStateEffector::linkInPrescribedMotionProperties(DynParamManager& states)
+{
+    this->prescribedPositionProperty = states.getPropertyReference(this->propName_prescribedPosition);
+    this->prescribedVelocityProperty = states.getPropertyReference(this->propName_prescribedVelocity);
+    this->prescribedAccelerationProperty = states.getPropertyReference(this->propName_prescribedAcceleration);
+    this->prescribedAttitudeProperty = states.getPropertyReference(this->propName_prescribedAttitude);
+    this->prescribedAngVelocityProperty = states.getPropertyReference(this->propName_prescribedAngVelocity);
+    this->prescribedAngAccelerationProperty = states.getPropertyReference(this->propName_prescribedAngAcceleration);
+}
+
+/*! This method allows the SB state effector to register its states: theta and thetaDot with the dynamic parameter
+ * manager
+ *
+ * @param[in,out] statesIn Dynamic parameter manager used to register states or properties.
+ */
+void SpinningBodyTwoDOFStateEffector::registerStates(DynParamManager& statesIn)
+{
+    this->validateConfiguration();
+
+    // Register the theta states
+    this->theta1State = statesIn.registerState(1, 1, this->nameOfTheta1State);
+    this->theta2State = statesIn.registerState(1, 1, this->nameOfTheta2State);
+    Eigen::MatrixXd thetaInitMatrix(2, 1);
+    thetaInitMatrix(0, 0) = this->theta1Init;
+    thetaInitMatrix(1, 0) = this->theta2Init;
+    this->theta1State->setState(thetaInitMatrix.row(0));
+    this->theta2State->setState(thetaInitMatrix.row(1));
+
+    // Register the thetaDot states
+    this->theta1DotState = statesIn.registerState(1, 1, this->nameOfTheta1DotState);
+    this->theta2DotState = statesIn.registerState(1, 1, this->nameOfTheta2DotState);
+    Eigen::MatrixXd thetaDotInitMatrix(2, 1);
+    thetaDotInitMatrix(0, 0) = this->theta1DotInit;
+    thetaDotInitMatrix(1, 0) = this->theta2DotInit;
+    this->theta1DotState->setState(thetaDotInitMatrix.row(0));
+    this->theta2DotState->setState(thetaDotInitMatrix.row(1));
+
+    registerProperties(statesIn);
+}
+
+/*! This method attaches a dynamicEffector to the specified SB
+ @param newDynamicEffector the dynamic effector to be attached to the SB
+ @param segment the integer number segment to be attached to (inner segment=1, outer segment=2) */
+void SpinningBodyTwoDOFStateEffector::addDynamicEffector(DynamicEffector* newDynamicEffector, int segment)
+{
+    this->assignStateParamNames<DynamicEffector*>(newDynamicEffector, segment);
+
+    this->dynEffectors.push_back(newDynamicEffector);
+}
+
+/*! This method registers the SB inertial properties with the dynamic parameter manager and links
+ them into dependent dynamic effectors
+ *
+ * @param[in,out] states Dynamic parameter manager used to register states or properties.
+ */
+void SpinningBodyTwoDOFStateEffector::registerProperties(DynParamManager& states)
+{
+    Eigen::Vector3d stateInit = Eigen::Vector3d::Zero();
+    this->r_S1N_N = states.createProperty(this->nameOfInertialPositionProperty1, stateInit);
+    this->v_S1N_N = states.createProperty(this->nameOfInertialVelocityProperty1, stateInit);
+    this->sigma_S1N = states.createProperty(this->nameOfInertialAttitudeProperty1, stateInit);
+    this->omega_S1N_S1 = states.createProperty(this->nameOfInertialAngVelocityProperty1, stateInit);
+
+    this->r_S2N_N = states.createProperty(this->nameOfInertialPositionProperty2, stateInit);
+    this->v_S2N_N = states.createProperty(this->nameOfInertialVelocityProperty2, stateInit);
+    this->sigma_S2N = states.createProperty(this->nameOfInertialAttitudeProperty2, stateInit);
+    this->omega_S2N_S2 = states.createProperty(this->nameOfInertialAngVelocityProperty2, stateInit);
+
+    std::vector<DynamicEffector*>::iterator dynIt;
+    for (dynIt = this->dynEffectors.begin(); dynIt != this->dynEffectors.end(); dynIt++) {
+        (*dynIt)->linkInProperties(states);
+    }
+}
+
+/*! This method allows the SB state effector to provide its contributions to the mass props and mass prop rates of the
+ spacecraft
+ *
+ * @param[in] integTime [s] Current integration time.
+ */
+void SpinningBodyTwoDOFStateEffector::updateEffectorMassProps(double integTime [[maybe_unused]])
+{
+    // Give the mass of the spinning body to the effProps mass
+    this->mass = this->mass1 + this->mass2;
+    this->effProps.mEff = this->mass;
+
+    // Lock the axis if the flag is set to 1
+    Eigen::MatrixXd zeroMatrix = Eigen::MatrixXd::Constant(1, 1, 0.0);
+    if (this->lockFlag1 == 1) {
+        this->theta1DotState->setState(zeroMatrix);
+    }
+    if (this->lockFlag2 == 1) {
+        this->theta2DotState->setState(zeroMatrix);
+    }
+
+    // Grab current states
+    this->theta1 = this->theta1State->stateView()(0, 0);
+    this->theta1Dot = this->theta1DotState->stateView()(0, 0);
+    this->theta2 = this->theta2State->stateView()(0, 0);
+    this->theta2Dot = this->theta2DotState->stateView()(0, 0);
+
+    // Compute the DCM from both S frames to B frame
+    double dcm_S0S[3][3];
+    double prv_S0S_array[3];
+    Eigen::Vector3d prv_S0S;
+    prv_S0S = -this->theta1 * this->s1Hat_S1;
+    eigenVector3d2CArray(prv_S0S, prv_S0S_array);
+    PRV2C(prv_S0S_array, dcm_S0S);
+    this->dcm_BS1 = this->dcm_S10B.transpose() * c2DArray2EigenMatrix3d(dcm_S0S);
+    prv_S0S = -this->theta2 * this->s2Hat_S2;
+    eigenVector3d2CArray(prv_S0S, prv_S0S_array);
+    PRV2C(prv_S0S_array, dcm_S0S);
+    this->dcm_BS2 = this->dcm_BS1 * this->dcm_S20S1.transpose() * c2DArray2EigenMatrix3d(dcm_S0S);
+
+    // Write the spinning axis in B frame
+    this->s1Hat_B = this->dcm_BS1 * this->s1Hat_S1;
+    this->s2Hat_B = this->dcm_BS2 * this->s2Hat_S2;
+
+    // Compute the effector's CoM with respect to point B
+    this->r_Sc1S1_B = this->dcm_BS1 * this->r_Sc1S1_S1;
+    this->r_Sc1B_B = this->r_Sc1S1_B + this->r_S1B_B;
+    this->r_Sc2S2_B = this->dcm_BS2 * this->r_Sc2S2_S2;
+    this->r_S2S1_B = this->dcm_BS1 * this->r_S2S1_S1;
+    this->r_Sc2S1_B = this->r_Sc2S2_B + this->r_S2S1_B;
+    this->r_Sc2B_B = this->r_Sc2S1_B + this->r_S1B_B;
+    this->r_ScB_B = (this->mass1 * this->r_Sc1B_B + this->mass2 * this->r_Sc2B_B) / this->mass;
+    this->effProps.rEff_CB_B = this->r_ScB_B;
+
+    // Find the inertia of the hinged rigid bodies about point B
+    this->rTilde_Sc1B_B = eigenTilde(this->r_Sc1B_B);
+    this->IS1PntSc1_B = this->dcm_BS1 * this->IS1PntSc1_S1 * this->dcm_BS1.transpose();
+    this->rTilde_Sc2B_B = eigenTilde(this->r_Sc2B_B);
+    this->IS2PntSc2_B = this->dcm_BS2 * this->IS2PntSc2_S2 * this->dcm_BS2.transpose();
+    this->effProps.IEffPntB_B = this->IS1PntSc1_B + this->IS2PntSc2_B -
+                                this->mass1 * this->rTilde_Sc1B_B * this->rTilde_Sc1B_B -
+                                this->mass2 * this->rTilde_Sc2B_B * this->rTilde_Sc2B_B;
+
+    // Define omega_S1B_B, omega_S2S1_B, omega_S2B_B, and their cross product operator
+    this->omega_S1B_B = this->theta1Dot * this->s1Hat_B;
+    this->omega_S2S1_B = this->theta2Dot * this->s2Hat_B;
+    this->omega_S2B_B = this->omega_S2S1_B + this->omega_S1B_B;
+    this->omegaTilde_S1B_B = eigenTilde(this->omega_S1B_B);
+    this->omegaTilde_S2B_B = eigenTilde(this->omega_S2B_B);
+
+    // Find rPrime_Sc1B_B and rPrime_Sc2B_B
+    this->rPrime_Sc1S1_B = this->omegaTilde_S1B_B * this->r_Sc1S1_B;
+    this->rPrime_Sc1B_B = this->rPrime_Sc1S1_B;
+    this->rPrime_Sc2S2_B = this->omegaTilde_S2B_B * this->r_Sc2S2_B;
+    this->rPrime_S2S1_B = this->omegaTilde_S1B_B * this->r_S2S1_B;
+    this->rPrime_Sc2S1_B = this->rPrime_Sc2S2_B + this->rPrime_S2S1_B;
+    this->rPrime_Sc2B_B = this->rPrime_Sc2S1_B;
+    this->rPrime_ScB_B = (this->mass1 * this->rPrime_Sc1B_B + this->mass2 * this->rPrime_Sc2B_B) / this->mass;
+    this->effProps.rEffPrime_CB_B = this->rPrime_ScB_B;
+
+    // Find the body-frame time derivative of the inertias of each spinner
+    this->IPrimeS1PntSc1_B = this->omegaTilde_S1B_B * this->IS1PntSc1_B - this->IS1PntSc1_B * this->omegaTilde_S1B_B;
+    this->IPrimeS2PntSc2_B = this->omegaTilde_S2B_B * this->IS2PntSc2_B - this->IS2PntSc2_B * this->omegaTilde_S2B_B;
+
+    // Find body time derivative of IPntSc_B
+    Eigen::Matrix3d rPrimeTilde_Sc1B_B = eigenTilde(this->rPrime_Sc1B_B);
+    Eigen::Matrix3d rPrimeTilde_Sc2B_B = eigenTilde(this->rPrime_Sc2B_B);
+    this->effProps.IEffPrimePntB_B =
+        this->IPrimeS1PntSc1_B + this->IPrimeS2PntSc2_B -
+        this->mass1 * (rPrimeTilde_Sc1B_B * this->rTilde_Sc1B_B + this->rTilde_Sc1B_B * rPrimeTilde_Sc1B_B) -
+        this->mass2 * (rPrimeTilde_Sc2B_B * this->rTilde_Sc2B_B + this->rTilde_Sc2B_B * rPrimeTilde_Sc2B_B);
+}
+
+/*! This method allows the SB state effector to give its contributions to the matrices needed for the back-sub
+ method
+ *
+ * @param[in] integTime [s] Current integration time.
+ * @param[in,out] backSubContr Backsubstitution contributions.
+ * @param[in] sigma_BN Hub attitude relative to the inertial frame.
+ * @param[in] omega_BN_B [rad/s] Hub angular velocity expressed in body-frame components.
+ * @param[in] g_N [m/s^2] Gravitational acceleration expressed in inertial-frame components.
+ */
+void SpinningBodyTwoDOFStateEffector::updateContributions(double integTime,
+                                                          BackSubMatrices& backSubContr,
+                                                          Eigen::MRPd sigma_BN,
+                                                          Eigen::Vector3d omega_BN_B,
+                                                          Eigen::Vector3d g_N)
+{
+    // Find the DCM from N to B frames
+    this->sigma_BN = sigma_BN;
+    this->dcm_BN = (this->sigma_BN.toRotationMatrix()).transpose();
+
+    // Map gravity to body frame
+    Eigen::Vector3d gLocal_N;
+    Eigen::Vector3d g_B;
+    gLocal_N = g_N;
+    g_B = this->dcm_BN * gLocal_N;
+
+    // Update omega_BN_B
+    this->omega_BN_B = omega_BN_B;
+    this->omega_S1N_B = this->omega_S1B_B + this->omega_BN_B;
+    this->omega_S2N_B = this->omega_S2B_B + this->omega_BN_B;
+
+    if (!this->dynEffectors.empty()) {
+        this->rDot_S1B_B = this->omega_BN_B.cross(this->r_S1B_B);
+        this->rDot_S2B_B = this->rDot_S1B_B + this->rPrime_S2S1_B + this->omega_BN_B.cross(this->r_S2S1_B);
+        this->rDot_Sc1B_B = this->rPrime_Sc1B_B + this->omega_BN_B.cross(this->r_Sc1B_B);
+        this->rDot_Sc2B_B = this->rPrime_Sc2B_B + this->omega_BN_B.cross(this->r_Sc2B_B);
+        this->computeSpinningBodyInertialStates();
+    }
+
+    // Loop through to collect forces and torques from any connected dynamic effectors
+    Eigen::Vector3d attBodyForce_S1 = Eigen::Vector3d::Zero();
+    Eigen::Vector3d attBodyTorquePntS1_S1 = Eigen::Vector3d::Zero();
+    Eigen::Vector3d attBodyForce_S2 = Eigen::Vector3d::Zero();
+    Eigen::Vector3d attBodyTorquePntS2_S2 = Eigen::Vector3d::Zero();
+    std::vector<DynamicEffector*>::iterator dynIt;
+    for (dynIt = this->dynEffectors.begin(); dynIt != this->dynEffectors.end(); dynIt++) {
+        // Compute the force and torque contributions from the dynamicEffectors in parent frame
+        (*dynIt)->computeForceTorque(integTime, double(0.0));
+        if ((*dynIt)->getPropName_inertialPosition() == this->nameOfInertialPositionProperty1) {
+            // a child's "_B" loads are already in the lower body's S1 frame, so only "_N" is rotated
+            attBodyForce_S1 +=
+                (*dynIt)->forceExternal_B + this->dcm_BS1.transpose() * this->dcm_BN * (*dynIt)->forceExternal_N;
+            attBodyTorquePntS1_S1 += (*dynIt)->torqueExternalPntB_B;
+        } else if ((*dynIt)->getPropName_inertialPosition() == this->nameOfInertialPositionProperty2) {
+            // a child's "_B" loads are already in the upper body's S2 frame, so only "_N" is rotated
+            attBodyForce_S2 +=
+                (*dynIt)->forceExternal_B + this->dcm_BS2.transpose() * this->dcm_BN * (*dynIt)->forceExternal_N;
+            attBodyTorquePntS2_S2 += (*dynIt)->torqueExternalPntB_B;
+        }
+    }
+
+    // Define auxiliary position vectors
+    Eigen::Vector3d r_ScS1_B = (this->mass1 * this->r_Sc1S1_B + this->mass2 * this->r_Sc2S1_B) / this->mass;
+    Eigen::Vector3d r_S2B_B = this->r_S2S1_B + this->r_S1B_B;
+
+    // Define auxiliary rtilde matrices
+    Eigen::Matrix3d rTilde_Sc1S1_B = eigenTilde(this->r_Sc1S1_B);
+    Eigen::Matrix3d rTilde_Sc2S1_B = eigenTilde(r_Sc2S1_B);
+    Eigen::Matrix3d rTilde_Sc2S2_B = eigenTilde(this->r_Sc2S2_B);
+    Eigen::Matrix3d rTilde_S2S1_B = eigenTilde(this->r_S2S1_B);
+    Eigen::Matrix3d rPrimeTilde_Sc1S1_B = eigenTilde(this->rPrime_Sc1S1_B);
+    Eigen::Matrix3d rPrimeTilde_Sc2S1_B = eigenTilde(this->rPrime_Sc2S1_B);
+    Eigen::Matrix3d rPrimeTilde_Sc2S2_B = eigenTilde(this->rPrime_Sc2S2_B);
+
+    // Define auxiliary inertia matrices
+    Eigen::Matrix3d IS2PntS2_B = this->IS2PntSc2_B - this->mass2 * rTilde_Sc2S2_B * rTilde_Sc2S2_B;
+    Eigen::Matrix3d ISPntS1_B = this->IS1PntSc1_B - this->mass1 * rTilde_Sc1S1_B * rTilde_Sc1S1_B + this->IS2PntSc2_B -
+                                this->mass2 * rTilde_Sc2S1_B * rTilde_Sc2S1_B;
+    Eigen::Matrix3d IPrimeSPntS1_B =
+        this->IPrimeS1PntSc1_B -
+        this->mass1 * (rPrimeTilde_Sc1S1_B * rTilde_Sc1S1_B + rTilde_Sc1S1_B * rPrimeTilde_Sc1S1_B) +
+        this->IPrimeS2PntSc2_B -
+        this->mass2 * (rPrimeTilde_Sc2S1_B * rTilde_Sc2S1_B + rTilde_Sc2S1_B * rPrimeTilde_Sc2S1_B);
+    Eigen::Matrix3d IPrimeS2PntS2_B = this->IPrimeS2PntSc2_B - this->mass2 * (rPrimeTilde_Sc2S2_B * rTilde_Sc2S2_B +
+                                                                              rTilde_Sc2S2_B * rPrimeTilde_Sc2S2_B);
+
+    // Define and populate the mass matrix for thetaDDot
+    Eigen::Matrix2d MTheta;
+    MTheta << this->s1Hat_B.transpose() * ISPntS1_B * this->s1Hat_B,
+        this->s1Hat_B.transpose() * (this->IS2PntSc2_B - this->mass2 * rTilde_Sc2S1_B * rTilde_Sc2S2_B) * this->s2Hat_B,
+        this->s2Hat_B.transpose() * (IS2PntS2_B - this->mass2 * rTilde_Sc2S2_B * rTilde_S2S1_B) * this->s1Hat_B,
+        this->s2Hat_B.transpose() * IS2PntS2_B * this->s2Hat_B;
+
+    // Define AThetaStar matrix
+    Eigen::Matrix<double, 2, 3> AThetaStar;
+    const Eigen::Vector3d rScS1CrossS1Hat_B = r_ScS1_B.cross(this->s1Hat_B);
+    const Eigen::Vector3d rSc2S2CrossS2Hat_B = this->r_Sc2S2_B.cross(this->s2Hat_B);
+    AThetaStar.row(0) = this->mass * rScS1CrossS1Hat_B.transpose();
+    AThetaStar.row(1) = this->mass2 * rSc2S2CrossS2Hat_B.transpose();
+
+    // Define BThetaStar matrix
+    Eigen::Matrix<double, 2, 3> BThetaStar;
+    BThetaStar.row(0) =
+        (-ISPntS1_B * this->s1Hat_B + this->mass * this->r_S1B_B.cross(r_ScS1_B.cross(this->s1Hat_B))).transpose();
+    BThetaStar.row(1) =
+        (-IS2PntS2_B * this->s2Hat_B + this->mass2 * r_S2B_B.cross(this->r_Sc2S2_B.cross(this->s2Hat_B))).transpose();
+
+    // Define CThetaStar vector
+    Eigen::Vector3d rDot_S1B_B = this->omega_BN_B.cross(this->r_S1B_B);
+    Eigen::Vector3d rDot_S2S1_B = this->rPrime_S2S1_B + this->omega_BN_B.cross(this->r_S2S1_B);
+    Eigen::Vector3d gravityTorquePntS1_B = r_ScS1_B.cross(this->mass * g_B);
+    Eigen::Vector3d gravityTorquePntS2_B = this->r_Sc2S2_B.cross(this->mass2 * g_B);
+    Eigen::Vector3d cThetaTerm0_B =
+        IPrimeSPntS1_B * this->omega_BN_B + this->omega_BN_B.cross(ISPntS1_B * this->omega_BN_B) +
+        this->IPrimeS1PntSc1_B * this->omega_S1B_B + this->omega_BN_B.cross(this->IS1PntSc1_B * this->omega_S1B_B) +
+        this->IPrimeS2PntSc2_B * this->omega_S2B_B + this->omega_BN_B.cross(this->IS2PntSc2_B * this->omega_S2B_B) +
+        this->IS2PntSc2_B * this->omega_S1B_B.cross(this->omega_S2S1_B) -
+        this->mass2 * r_Sc2S1_B.cross(this->r_Sc2S2_B.cross(this->omega_S1B_B.cross(this->omega_S2S1_B))) +
+        this->mass1 * (this->r_Sc1S1_B.cross(this->omega_S1B_B.cross(this->rPrime_Sc1S1_B)) +
+                       this->omega_BN_B.cross(this->r_Sc1S1_B.cross(this->rPrime_Sc1S1_B))) +
+        this->mass2 * (r_Sc2S1_B.cross(this->omega_S1B_B.cross(this->rPrime_Sc2S1_B)) +
+                       this->omega_BN_B.cross(r_Sc2S1_B.cross(this->rPrime_Sc2S1_B))) +
+        this->mass2 * r_Sc2S1_B.cross(this->omega_S2S1_B.cross(this->rPrime_Sc2S2_B)) +
+        this->mass * r_ScS1_B.cross(this->omega_BN_B.cross(rDot_S1B_B)) - this->dcm_BS1 * attBodyTorquePntS1_S1 -
+        this->dcm_BS2 * attBodyTorquePntS2_S2 - this->r_S2S1_B.cross(this->dcm_BS2 * attBodyForce_S2);
+    Eigen::Vector3d cThetaTerm1_B =
+        IPrimeS2PntS2_B * this->omega_S2N_B + this->omega_BN_B.cross(IS2PntS2_B * this->omega_S2N_B) +
+        IS2PntS2_B * this->omega_S1B_B.cross(this->omega_S2S1_B) +
+        this->mass2 * this->r_Sc2S2_B.cross(this->omega_S1N_B.cross(this->rPrime_S2S1_B)) +
+        this->mass2 * this->r_Sc2S2_B.cross(this->omega_BN_B.cross(rDot_S2S1_B + rDot_S1B_B)) -
+        this->dcm_BS2 * attBodyTorquePntS2_S2;
+    Eigen::Vector2d CThetaStar;
+    CThetaStar(0, 0) = this->u1 - this->k1 * (this->theta1 - this->theta1Ref) -
+                       this->c1 * (this->theta1Dot - this->theta1DotRef) + this->s1Hat_B.dot(gravityTorquePntS1_B) -
+                       this->s1Hat_B.dot(cThetaTerm0_B);
+    CThetaStar(1, 0) = this->u2 - this->k2 * (this->theta2 - this->theta2Ref) -
+                       this->c2 * (this->theta2Dot - this->theta2DotRef) + this->s2Hat_B.dot(gravityTorquePntS2_B) -
+                       this->s2Hat_B.dot(cThetaTerm1_B);
+
+    // Check if any of the axis are locked and change dynamics accordingly
+    if (this->lockFlag1 == 1 || this->lockFlag2 == 1) {
+        // Remove cross-coupling
+        MTheta(0, 1) = 0.0;
+        MTheta(1, 0) = 0.0;
+
+        if (this->lockFlag1 == 1) {
+            AThetaStar.row(0).setZero();
+            BThetaStar.row(0).setZero();
+            CThetaStar.row(0).setZero();
+        }
+        if (this->lockFlag2 == 1) {
+            AThetaStar.row(1).setZero();
+            BThetaStar.row(1).setZero();
+            CThetaStar.row(1).setZero();
+        }
+    }
+
+    // Define the ATheta, BTheta and CTheta matrices
+    this->ATheta = MTheta.inverse() * AThetaStar;
+    this->BTheta = MTheta.inverse() * BThetaStar;
+    this->CTheta = MTheta.inverse() * CThetaStar;
+
+    // For documentation on contributions see Vaz Carneiro, Allard, Schaub spinning body paper
+    // Translation contributions
+    backSubContr.matrixA =
+        -this->mass * rScS1CrossS1Hat_B * this->ATheta.row(0) - this->mass2 * rSc2S2CrossS2Hat_B * this->ATheta.row(1);
+    backSubContr.matrixB =
+        -this->mass * rScS1CrossS1Hat_B * this->BTheta.row(0) - this->mass2 * rSc2S2CrossS2Hat_B * this->BTheta.row(1);
+    backSubContr.vecTrans = -this->mass * this->omega_S1B_B.cross(this->rPrime_ScB_B) -
+                            this->mass2 * (this->omega_S2S1_B.cross(this->rPrime_Sc2S2_B) -
+                                           this->r_Sc2S2_B.cross(this->omega_S1B_B.cross(this->omega_S2S1_B))) +
+                            this->mass * rScS1CrossS1Hat_B * this->CTheta(0, 0) +
+                            this->mass2 * rSc2S2CrossS2Hat_B * this->CTheta(1, 0) + this->dcm_BS1 * attBodyForce_S1 +
+                            this->dcm_BS2 * attBodyForce_S2;
+
+    // Rotation contributions
+    Eigen::Vector3d rotFactor0_B = (this->IS1PntSc1_B + this->IS2PntSc2_B) * this->s1Hat_B -
+                                   this->mass1 * this->r_Sc1B_B.cross(this->r_Sc1S1_B.cross(this->s1Hat_B)) -
+                                   this->mass2 * this->r_Sc2B_B.cross(r_Sc2S1_B.cross(this->s1Hat_B));
+    Eigen::Vector3d rotFactor1_B =
+        this->IS2PntSc2_B * this->s2Hat_B - this->mass2 * this->r_Sc2B_B.cross(this->r_Sc2S2_B.cross(this->s2Hat_B));
+    backSubContr.matrixC = rotFactor0_B * this->ATheta.row(0) + rotFactor1_B * this->ATheta.row(1);
+    backSubContr.matrixD = rotFactor0_B * this->BTheta.row(0) + rotFactor1_B * this->BTheta.row(1);
+    backSubContr.vecRot =
+        -this->IPrimeS1PntSc1_B * this->omega_S1B_B - this->omega_BN_B.cross(this->IS1PntSc1_B * this->omega_S1B_B) -
+        this->IPrimeS2PntSc2_B * this->omega_S2B_B - this->omega_BN_B.cross(this->IS2PntSc2_B * this->omega_S2B_B) -
+        this->IS2PntSc2_B * this->omega_S1B_B.cross(this->omega_S2S1_B) +
+        this->mass2 * this->r_Sc2B_B.cross(this->r_Sc2S2_B.cross(this->omega_S1B_B.cross(this->omega_S2S1_B))) -
+        this->mass1 * (this->r_Sc1B_B.cross(this->omega_S1B_B.cross(this->rPrime_Sc1B_B)) +
+                       this->omega_BN_B.cross(this->r_Sc1B_B.cross(this->rPrime_Sc1B_B))) -
+        this->mass2 * (this->r_Sc2B_B.cross(this->omega_S1B_B.cross(this->rPrime_Sc2B_B)) +
+                       this->omega_BN_B.cross(this->r_Sc2B_B.cross(this->rPrime_Sc2B_B))) -
+        this->mass2 * this->r_Sc2B_B.cross(this->omega_S2S1_B.cross(this->rPrime_Sc2S2_B)) -
+        rotFactor0_B * this->CTheta(0, 0) - rotFactor1_B * this->CTheta(1, 0) + this->dcm_BS1 * attBodyTorquePntS1_S1 +
+        this->dcm_BS2 * attBodyTorquePntS2_S2 + this->r_S1B_B.cross(this->dcm_BS1 * attBodyForce_S1) +
+        (this->r_S2S1_B + this->r_S1B_B).cross(this->dcm_BS2 * attBodyForce_S2);
+}
+
+/*! @brief Add prescribed-motion coupling terms.
+ *
+ * @param[in,out] backSubContr Backsubstitution contributions.
+ */
+void SpinningBodyTwoDOFStateEffector::addPrescribedMotionCouplingContributions(BackSubMatrices& backSubContr)
+{
+
+    // Access prescribed motion properties
+    Eigen::Vector3d r_PB_B = (Eigen::Vector3d) * this->prescribedPositionProperty;
+    Eigen::Vector3d rPrime_PB_B = (Eigen::Vector3d) * this->prescribedVelocityProperty;
+    Eigen::Vector3d rPrimePrime_PB_B = (Eigen::Vector3d) * this->prescribedAccelerationProperty;
+    Eigen::MRPd sigma_PB(this->prescribedAttitudeProperty->data());
+    Eigen::Vector3d omega_PB_P = (Eigen::Vector3d) * this->prescribedAngVelocityProperty;
+    Eigen::Vector3d omegaPrime_PB_P = (Eigen::Vector3d) * this->prescribedAngAccelerationProperty;
+    Eigen::Matrix3d dcm_PB = sigma_PB.toRotationMatrix().transpose();
+
+    // Collect hub states
+    Eigen::Vector3d omega_BN_B = this->hubOmega->stateView();
+    Eigen::Vector3d omega_BN_P = dcm_PB * omega_BN_B;
+
+    // Prescribed motion translation coupling contributions
+    Eigen::Vector3d s1Hat_P = this->s1Hat_B;
+    Eigen::Vector3d s2Hat_P = this->s2Hat_B;
+    Eigen::Vector3d r_PB_P = dcm_PB * r_PB_B;
+    Eigen::Matrix3d rTilde_PB_P = eigenTilde(r_PB_P);
+    Eigen::Vector3d r_Sc1S1_P = this->r_Sc1S1_B;
+    Eigen::Vector3d r_Sc2S1_P = this->r_Sc2S1_B;
+    Eigen::Vector3d r_Sc2S2_P = this->r_Sc2S2_B;
+    Eigen::Matrix3d rTilde_Sc1S1_P = eigenTilde(r_Sc1S1_P);
+    Eigen::Matrix3d rTilde_Sc2S1_P = eigenTilde(r_Sc2S1_P);
+    Eigen::Matrix3d rTilde_Sc2S2_P = eigenTilde(r_Sc2S2_P);
+
+    backSubContr.matrixB +=
+        (this->mass1 * rTilde_Sc1S1_P + this->mass2 * rTilde_Sc2S1_P) * s1Hat_P * this->ATheta.row(0) * rTilde_PB_P +
+        this->mass2 * rTilde_Sc2S2_P * s2Hat_P * this->ATheta.row(1) * rTilde_PB_P;
+
+    Eigen::Matrix3d omegaTilde_PB_P = eigenTilde(omega_PB_P);
+    Eigen::Vector3d rPPrime_Sc1P_P = this->rPrime_Sc1B_B;
+    Eigen::Vector3d rPPrime_Sc2P_P = this->rPrime_Sc2B_B;
+    Eigen::Matrix3d omegaPrimeTilde_PB_P = eigenTilde(omegaPrime_PB_P);
+    Eigen::Vector3d r_Sc1P_P = this->r_Sc1B_B;
+    Eigen::Vector3d r_Sc2P_P = this->r_Sc2B_B;
+    Eigen::Vector3d rPrimePrime_PB_P = dcm_PB * rPrimePrime_PB_B;
+    Eigen::Matrix3d omegaTilde_BN_P = eigenTilde(omega_BN_P);
+    Eigen::Vector3d rPrime_PB_P = dcm_PB * rPrime_PB_B;
+    Eigen::Vector3d transTerm1 =
+        -2.0 * omegaTilde_PB_P * (this->mass1 * rPPrime_Sc1P_P + this->mass2 * rPPrime_Sc2P_P) -
+        omegaPrimeTilde_PB_P * (this->mass1 * r_Sc1P_P + this->mass2 * r_Sc2P_P) -
+        omegaTilde_PB_P * omegaTilde_PB_P * (this->mass1 * r_Sc1P_P + this->mass2 * r_Sc2P_P) -
+        (this->mass1 + this->mass2) * rPrimePrime_PB_P;
+    Eigen::Vector3d intTerm1 =
+        rPrimePrime_PB_P + 2.0 * omegaTilde_BN_P * rPrime_PB_P + omegaTilde_BN_P * omegaTilde_BN_P * r_PB_P;
+    Eigen::Vector3d intTerm2 = omegaPrime_PB_P + omegaTilde_BN_P * omega_PB_P;
+
+    Eigen::Vector3d transTerm2 = (this->mass1 * rTilde_Sc1S1_P + this->mass2 * rTilde_Sc2S1_P) *
+                                 (this->ATheta.row(0).dot(intTerm1) + this->BTheta.row(0).dot(intTerm2)) * s1Hat_P;
+    Eigen::Vector3d transTerm3 = this->mass2 * rTilde_Sc2S2_P *
+                                 (this->ATheta.row(1).dot(intTerm1) + this->BTheta.row(1).dot(intTerm2)) * s2Hat_P;
+    backSubContr.vecTrans += transTerm1 + transTerm2 + transTerm3;
+
+    // Prescribed motion rotation coupling contributions
+    backSubContr.matrixC += -(this->mass1 * rTilde_PB_P * rTilde_Sc1S1_P + this->mass2 * rTilde_PB_P * rTilde_Sc2S1_P) *
+                                s1Hat_P * this->ATheta.row(0) -
+                            this->mass2 * rTilde_PB_P * rTilde_Sc2S2_P * s2Hat_P * this->ATheta.row(1);
+
+    Eigen::Matrix3d intTerm3 = this->mass1 * rTilde_PB_P * rTilde_Sc1S1_P + this->mass2 * rTilde_PB_P * rTilde_Sc2S1_P;
+    Eigen::Matrix3d IS1PntSc1_P = this->IS1PntSc1_B;
+    Eigen::Matrix3d IS2PntSc2_P = this->IS2PntSc2_B;
+    Eigen::Matrix3d rTilde_Sc1P_P = eigenTilde(r_Sc1P_P);
+    Eigen::Matrix3d rTilde_Sc2P_P = eigenTilde(r_Sc2P_P);
+    Eigen::Matrix3d intTerm4 = IS1PntSc1_P + IS2PntSc2_P - this->mass1 * rTilde_Sc1P_P * rTilde_Sc1S1_P -
+                               this->mass2 * rTilde_Sc2P_P * rTilde_Sc2S1_P - intTerm3;
+    Eigen::Matrix3d intTerm5 = this->mass2 * rTilde_PB_P * rTilde_Sc2S2_P;
+    Eigen::Matrix3d intTerm6 = IS2PntSc2_P - this->mass2 * rTilde_Sc2P_P * rTilde_Sc2S2_P - intTerm5;
+    backSubContr.matrixD +=
+        -intTerm3 * s1Hat_P * this->BTheta.row(0) - intTerm4 * s1Hat_P * this->ATheta.row(0) * rTilde_PB_P -
+        intTerm5 * s2Hat_P * this->BTheta.row(1) - intTerm6 * s2Hat_P * this->ATheta.row(1) * rTilde_PB_P;
+
+    Eigen::Matrix3d IPPrimeS1PntSc1_P = this->IPrimeS1PntSc1_B;
+    Eigen::Matrix3d IPPrimeS2PntSc2_P = this->IPrimeS2PntSc2_B;
+    Eigen::Vector3d omega_S1P_P = this->omega_S1B_B;
+    Eigen::Vector3d vecRotTerm1 = -IPPrimeS1PntSc1_P * omega_PB_P - IPPrimeS2PntSc2_P * omega_PB_P;
+
+    Eigen::Vector3d omega_PN_P = omega_PB_P + omega_BN_P;
+    Eigen::Matrix3d omegaTilde_PN_P = eigenTilde(omega_PN_P);
+    Eigen::Vector3d vecRotTerm2 = -IS1PntSc1_P * omegaPrime_PB_P - IS2PntSc2_P * omegaPrime_PB_P -
+                                  omegaTilde_PN_P * (IS1PntSc1_P * omega_PB_P + IS2PntSc2_P * omega_PB_P);
+
+    Eigen::Matrix3d omegaTilde_S1P_P = eigenTilde(omega_S1P_P);
+    Eigen::Vector3d rPPrime_Sc1S1_P = this->rPrime_Sc1S1_B;
+    Eigen::Vector3d intTerm7 = -this->mass1 * rTilde_PB_P * omegaTilde_S1P_P * rPPrime_Sc1S1_P;
+    Eigen::Vector3d rPPrime_Sc2S2_P = this->rPrime_Sc2S2_B;
+    Eigen::Vector3d omega_S2S1_P = this->omega_S2S1_B;
+    Eigen::Matrix3d omegaTilde_S2S1_P = eigenTilde(omega_S2S1_P);
+    Eigen::Vector3d rPPrime_Sc2S1_P = this->rPrime_Sc2S1_B;
+    Eigen::Vector3d intTerm8 = -this->mass2 * rTilde_PB_P *
+                               (omegaTilde_S1P_P * omegaTilde_S2S1_P * r_Sc2S2_P + omegaTilde_S2S1_P * rPPrime_Sc2S2_P +
+                                omegaTilde_S1P_P * rPPrime_Sc2S1_P);
+    Eigen::Vector3d vecRotTerm3 = intTerm7 + intTerm8;
+
+    Eigen::Vector3d r_Sc1B_P = r_Sc1P_P + r_PB_P;
+    Eigen::Matrix3d rTilde_Sc1B_P = eigenTilde(r_Sc1B_P);
+    Eigen::Vector3d intTerm9 = -this->mass1 * rTilde_Sc1B_P *
+                               (2.0 * omegaTilde_PB_P * rPPrime_Sc1P_P + omegaPrimeTilde_PB_P * r_Sc1P_P +
+                                omegaTilde_PB_P * omegaTilde_PB_P * r_Sc1P_P + rPrimePrime_PB_P);
+    Eigen::Vector3d r_Sc2B_P = r_Sc2P_P + r_PB_P;
+    Eigen::Matrix3d rTilde_Sc2B_P = eigenTilde(r_Sc2B_P);
+    Eigen::Vector3d intTerm10 = -this->mass2 * rTilde_Sc2B_P *
+                                (2.0 * omegaTilde_PB_P * rPPrime_Sc2P_P + omegaPrimeTilde_PB_P * r_Sc2P_P +
+                                 omegaTilde_PB_P * omegaTilde_PB_P * r_Sc2P_P + rPrimePrime_PB_P);
+    Eigen::Vector3d vecRotTerm4 = intTerm9 + intTerm10;
+
+    Eigen::Vector3d intTerm11 =
+        -this->mass1 * omegaTilde_PN_P * rTilde_Sc1P_P * (omegaTilde_PB_P * r_Sc1P_P + rPrime_PB_P) -
+        this->mass2 * omegaTilde_PN_P * rTilde_Sc2P_P * (omegaTilde_PB_P * r_Sc2P_P + rPrime_PB_P);
+    Eigen::Vector3d intTerm12 =
+        -this->mass1 * omegaTilde_PN_P * rTilde_PB_P * (rPPrime_Sc1P_P + omegaTilde_PB_P * r_Sc1P_P + rPrime_PB_P) -
+        this->mass2 * omegaTilde_PN_P * rTilde_PB_P * (rPPrime_Sc2P_P + omegaTilde_PB_P * r_Sc2P_P + rPrime_PB_P);
+    Eigen::Vector3d intTerm13 =
+        this->mass1 * omegaTilde_PB_P * rTilde_Sc1B_P * (rPPrime_Sc1P_P + omegaTilde_PB_P * r_Sc1P_P + rPrime_PB_P) +
+        this->mass2 * omegaTilde_PB_P * rTilde_Sc2B_P * (rPPrime_Sc2P_P + omegaTilde_PB_P * r_Sc2P_P + rPrime_PB_P);
+    Eigen::Vector3d vecRotTerm5 = intTerm11 + intTerm12 + intTerm13;
+
+    Eigen::Vector3d vecRotTerm6 =
+        -intTerm4 * (this->ATheta.row(0).dot(intTerm1) + this->BTheta.row(0).dot(intTerm2)) * s1Hat_P -
+        intTerm6 * (this->ATheta.row(1).dot(intTerm1) + this->BTheta.row(1).dot(intTerm2)) * s2Hat_P;
+    Eigen::Vector3d vecRotTerm7 = intTerm3 * s1Hat_P * this->CTheta.row(0) + intTerm5 * s2Hat_P * this->CTheta.row(1);
+
+    backSubContr.vecRot +=
+        vecRotTerm1 + vecRotTerm2 + vecRotTerm3 + vecRotTerm4 + vecRotTerm5 + vecRotTerm6 + vecRotTerm7;
+}
+
+/*! This method is used to find the derivatives for the SB stateEffector: thetaDDot and the kinematic derivative
+ *
+ * @param[in] integTime [s] Current integration time.
+ * @param[in] rDDot_BN_N [m/s^2] Hub translational acceleration expressed in inertial-frame components.
+ * @param[in] omegaDot_BN_B [rad/s^2] Hub angular acceleration expressed in body-frame components.
+ * @param[in] sigma_BN Hub attitude relative to the inertial frame.
+ */
+void SpinningBodyTwoDOFStateEffector::computeDerivatives(double integTime [[maybe_unused]],
+                                                         Eigen::Vector3d rDDot_BN_N,
+                                                         Eigen::Vector3d omegaDot_BN_B,
+                                                         Eigen::MRPd sigma_BN [[maybe_unused]])
+{
+    // Grab omegaDot_BN_B
+    Eigen::Vector3d omegaDotLocal_BN_B;
+    omegaDotLocal_BN_B = omegaDot_BN_B;
+
+    // Find rDDotLoc_BN_B
+    const Eigen::Vector3d& rDDotLocal_BN_N = rDDot_BN_N;
+    Eigen::Vector3d rDDotLocal_BN_B = this->dcm_BN * rDDotLocal_BN_N;
+
+    // Compute theta and thetaDot derivatives
+    Eigen::Vector2d thetaDDot;
+    thetaDDot = this->ATheta * rDDotLocal_BN_B + this->BTheta * omegaDotLocal_BN_B + this->CTheta;
+    this->theta1State->setDerivative(this->theta1DotState->stateView());
+    this->theta1DotState->setDerivative(thetaDDot.row(0));
+    this->theta2State->setDerivative(this->theta2DotState->stateView());
+    this->theta2DotState->setDerivative(thetaDDot.row(1));
+}
+
+/*! This method is for calculating the contributions of the SB state effector to the energy and momentum of the
+ * spacecraft
+ *
+ * @param[in] integTime [s] Current integration time.
+ * @param[in,out] rotAngMomPntCContr_B [kg*m^2/s] Rotational angular momentum contribution.
+ * @param[in,out] rotEnergyContr [J] Rotational energy contribution.
+ * @param[in] omega_BN_B [rad/s] Hub angular velocity expressed in body-frame components.
+ */
+void SpinningBodyTwoDOFStateEffector::updateEnergyMomContributions(double integTime [[maybe_unused]],
+                                                                   Eigen::Vector3d& rotAngMomPntCContr_B,
+                                                                   double& rotEnergyContr,
+                                                                   Eigen::Vector3d omega_BN_B)
+{
+    // Update omega_BN_B and omega_SN_B
+    this->omega_BN_B = omega_BN_B;
+    this->omega_S1N_B = this->omega_S1B_B + this->omega_BN_B;
+    this->omega_S2N_B = this->omega_S2B_B + this->omega_BN_B;
+
+    // Compute the rDot terms
+    this->rDot_Sc1B_B = this->rPrime_Sc1B_B + this->omega_BN_B.cross(this->r_Sc1B_B);
+    this->rDot_Sc2B_B = this->rPrime_Sc2B_B + this->omega_BN_B.cross(this->r_Sc2B_B);
+    this->rDot_S1B_B = this->omega_BN_B.cross(this->r_S1B_B);
+    this->rDot_S2B_B = this->rDot_S1B_B + this->rPrime_S2S1_B + this->omega_BN_B.cross(this->r_S2S1_B);
+
+    // Find rotational angular momentum contribution from hub
+    rotAngMomPntCContr_B =
+        this->IS1PntSc1_B * this->omega_S1N_B + this->mass1 * this->rTilde_Sc1B_B * this->rDot_Sc1B_B +
+        this->IS2PntSc2_B * this->omega_S2N_B + this->mass2 * this->rTilde_Sc2B_B * this->rDot_Sc2B_B;
+
+    // Find rotational energy contribution from the hub
+    rotEnergyContr = 1.0 / 2.0 * this->omega_S1N_B.dot(this->IS1PntSc1_B * this->omega_S1N_B) +
+                     1.0 / 2.0 * this->mass1 * this->rDot_Sc1B_B.dot(this->rDot_Sc1B_B) +
+                     1.0 / 2.0 * this->k1 * (this->theta1 - this->theta1Ref) * (this->theta1 - this->theta1Ref) +
+                     1.0 / 2.0 * this->omega_S2N_B.dot(this->IS2PntSc2_B * this->omega_S2N_B) +
+                     1.0 / 2.0 * this->mass2 * this->rDot_Sc2B_B.dot(this->rDot_Sc2B_B) +
+                     1.0 / 2.0 * this->k2 * (this->theta2 - this->theta2Ref) * (this->theta2 - this->theta2Ref);
+}
+
+/*! This method computes the spinning body states relative to the inertial frame */
+void SpinningBodyTwoDOFStateEffector::computeSpinningBodyInertialStates()
+{
+    // - read live: the cached copy lags half a step at write time, unless a prescribed body set it
+    if (this->prescribedAttitudeProperty == nullptr) {
+        const Eigen::MRPd sigmaHub_BN(this->hubSigmaState->stateView().data());
+        this->dcm_BN = sigmaHub_BN.toRotationMatrix().transpose();
+    }
+
+    // Compute the inertial attitude
+    Eigen::Matrix3d dcm_S1N;
+    Eigen::Matrix3d dcm_S2N;
+    dcm_S1N = (this->dcm_BS1).transpose() * this->dcm_BN;
+    dcm_S2N = (this->dcm_BS2).transpose() * this->dcm_BN;
+    const Eigen::MRPd sigma_S1N = eigenC2MRP(dcm_S1N);
+    const Eigen::MRPd sigma_S2N = eigenC2MRP(dcm_S2N);
+    *this->sigma_S1N = sigma_S1N.coeffs();
+    *this->sigma_S2N = sigma_S2N.coeffs();
+
+    // Convert the angular velocity to the corresponding frame
+    *this->omega_S1N_S1 = dcm_BS1.transpose() * this->omega_S1N_B;
+    *this->omega_S2N_S2 = dcm_BS2.transpose() * this->omega_S2N_B;
+
+    // Compute the inertial position vectors
+    this->r_Sc1N_N = (Eigen::Vector3d)(*this->inertialPositionProperty) + this->dcm_BN.transpose() * this->r_Sc1B_B;
+    this->r_Sc2N_N = (Eigen::Vector3d)(*this->inertialPositionProperty) + this->dcm_BN.transpose() * this->r_Sc2B_B;
+    *this->r_S1N_N = (Eigen::Vector3d)(*this->inertialPositionProperty) + this->dcm_BN.transpose() * this->r_S1B_B;
+    *this->r_S2N_N = (Eigen::Vector3d)(*this->inertialPositionProperty) +
+                     this->dcm_BN.transpose() * (this->r_S1B_B + this->r_S2S1_B);
+
+    // Compute the inertial velocity vectors
+    this->v_Sc1N_N = (Eigen::Vector3d)(*this->inertialVelocityProperty) + this->dcm_BN.transpose() * this->rDot_Sc1B_B;
+    this->v_Sc2N_N = (Eigen::Vector3d)(*this->inertialVelocityProperty) + this->dcm_BN.transpose() * this->rDot_Sc2B_B;
+    *this->v_S1N_N = (Eigen::Vector3d)(*this->inertialVelocityProperty) + this->dcm_BN.transpose() * this->rDot_S1B_B;
+    *this->v_S2N_N = (Eigen::Vector3d)(*this->inertialVelocityProperty) + this->dcm_BN.transpose() * this->rDot_S2B_B;
+}
+
+/*! This method is used so that the simulation will ask SB to update messages
+ *
+ * @param[in] CurrentSimNanos [ns] Current simulation time.
+ */
+void SpinningBodyTwoDOFStateEffector::UpdateState(uint64_t CurrentSimNanos)
+{
+    //! - Read the incoming command array
+    if (this->motorTorqueInMsg.isLinked() && this->motorTorqueInMsg.isWritten()) {
+        ArrayMotorTorqueMsgPayload incomingCmdBuffer;
+        incomingCmdBuffer = this->motorTorqueInMsg();
+        this->u1 = incomingCmdBuffer.motorTorque[0];
+        this->u2 = incomingCmdBuffer.motorTorque[1];
+    }
+
+    //! - Zero the command buffer and read the incoming command array
+    if (this->motorLockInMsg.isLinked() && this->motorLockInMsg.isWritten()) {
+        ArrayEffectorLockMsgPayload incomingLockBuffer;
+        incomingLockBuffer = this->motorLockInMsg();
+        this->lockFlag1 = incomingLockBuffer.effectorLockFlag[0];
+        this->lockFlag2 = incomingLockBuffer.effectorLockFlag[1];
+    }
+
+    //! - Read the incoming angle command array
+    if (this->spinningBodyRefInMsgs[0].isLinked() && this->spinningBodyRefInMsgs[0].isWritten()) {
+        HingedRigidBodyMsgPayload incomingRefBuffer;
+        incomingRefBuffer = this->spinningBodyRefInMsgs[0]();
+        this->theta1Ref = incomingRefBuffer.theta;
+        this->theta1DotRef = incomingRefBuffer.thetaDot;
+    }
+    if (this->spinningBodyRefInMsgs[1].isLinked() && this->spinningBodyRefInMsgs[1].isWritten()) {
+        HingedRigidBodyMsgPayload incomingRefBuffer;
+        incomingRefBuffer = this->spinningBodyRefInMsgs[1]();
+        this->theta2Ref = incomingRefBuffer.theta;
+        this->theta2DotRef = incomingRefBuffer.thetaDot;
+    }
+
+    /* Write output messages*/
+    this->writeOutputStateMessages(CurrentSimNanos);
+}

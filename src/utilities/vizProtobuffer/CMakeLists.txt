@@ -1,0 +1,67 @@
+
+if(BUILD_VIZINTERFACE)
+    find_package(protobuf CONFIG REQUIRED QUIET)
+    message(VERBOSE "Scanning ${CMAKE_CURRENT_SOURCE_DIR} for protobuf interface definitions")
+
+     # Recheck Conan's toolchain and build environment after dependency upgrades.
+     # Older builds cached this path and can retain an incompatible compiler.
+     unset(PROTOC_EXE CACHE)
+     find_program(PROTOC_EXE
+         NAMES protoc
+         HINTS ${CMAKE_PROGRAM_PATH}
+         PATHS ENV PATH
+         NO_DEFAULT_PATH
+         NO_CACHE
+         REQUIRED
+     )
+
+     file(GLOB PROTO_DEFS CONFIGURE_DEPENDS
+         "${CMAKE_CURRENT_SOURCE_DIR}/*.proto")
+
+     foreach(PROTO_DEF ${PROTO_DEFS})
+         get_filename_component(PROTO_TARGET "${PROTO_DEF}" NAME_WE)
+
+         add_custom_command(
+             OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/${PROTO_TARGET}.pb.cc" "${CMAKE_CURRENT_SOURCE_DIR}/${PROTO_TARGET}.pb.h" "${CMAKE_CURRENT_SOURCE_DIR}/${PROTO_TARGET}_pb2.py"
+             COMMAND "${PROTOC_EXE}" "--proto_path=${CMAKE_CURRENT_SOURCE_DIR}" "--cpp_out=${CMAKE_CURRENT_SOURCE_DIR}" "${PROTO_DEF}"
+             COMMAND "${PROTOC_EXE}" "--proto_path=${CMAKE_CURRENT_SOURCE_DIR}" "--python_out=${CMAKE_CURRENT_SOURCE_DIR}" "${PROTO_DEF}"
+             DEPENDS "${PROTO_DEF}" "${PROTOC_EXE}"
+             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+             COMMENT "Generating protobuf (C++, Python): ${PROTO_TARGET}"
+             VERBATIM
+         )
+
+         message(VERBOSE "Defining protobuf interface library target: ${PROTO_TARGET}")
+
+         add_library(${PROTO_TARGET}
+             "${CMAKE_CURRENT_SOURCE_DIR}/${PROTO_TARGET}.pb.cc"
+         )
+
+         bsk_suppress_strict_warnings_for_sources(
+             "${CMAKE_CURRENT_SOURCE_DIR}/${PROTO_TARGET}.pb.cc"
+         )
+
+         target_include_directories(${PROTO_TARGET}
+             PUBLIC
+                 "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
+                 "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+         )
+
+         target_link_libraries(${PROTO_TARGET}
+             PUBLIC
+                 protobuf::protobuf
+         )
+
+         set_target_properties(${PROTO_TARGET} PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk")
+         set_target_properties(${PROTO_TARGET} PROPERTIES LIBRARY_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Basilisk")
+         set_target_properties(${PROTO_TARGET} PROPERTIES LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Basilisk")
+
+         set_target_properties(${PROTO_TARGET} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk")
+         set_target_properties(${PROTO_TARGET} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Basilisk")
+         set_target_properties(${PROTO_TARGET} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Basilisk")
+
+         set_target_properties(${PROTO_TARGET} PROPERTIES ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk")
+         set_target_properties(${PROTO_TARGET} PROPERTIES ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Basilisk")
+         set_target_properties(${PROTO_TARGET} PROPERTIES ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Basilisk")
+     endforeach()
+endif()

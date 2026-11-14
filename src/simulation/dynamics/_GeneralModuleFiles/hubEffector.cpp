@@ -1,0 +1,336 @@
+/*
+ ISC License
+
+ Copyright (c) 2016, Autonomous Vehicle Systems Lab, University of Colorado at Boulder
+
+ Permission to use, copy, modify, and/or distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+ */
+
+#include "hubEffector.h"
+#include "architecture/utilities/avsEigenSupport.h"
+#include <cmath>
+
+/*! This is the constructor, setting variables to default values */
+HubEffector::HubEffector()
+{
+    // - zero certain variables
+    this->MRPSwitchCount = 0;
+    this->effProps.mEff = 0.0;
+    this->effProps.rEff_CB_B.setZero();
+    this->effProps.IEffPntB_B.setZero();
+    this->effProps.rEffPrime_CB_B.setZero();
+    this->effProps.IEffPrimePntB_B.setZero();
+    this->r_CN_NInit.setZero();
+    this->v_CN_NInit.setZero();
+    this->sigma_BNInit.setZero();
+    this->omega_BN_BInit.setZero();
+
+    // - define default names for the hub states
+    this->nameOfHubPosition = "hubPosition";
+    this->nameOfHubVelocity = "hubVelocity";
+    this->nameOfHubSigma = "hubSigma";
+    this->nameOfHubOmega = "hubOmega";
+    this->nameOfHubGravVelocity = "hubGravVelocity";
+    this->nameOfBcGravVelocity = "BcGravVelocity";
+
+    // - define a default mass of 1kg
+    this->mHub = 1.0;
+    this->IHubPntBc_B.setIdentity();
+    this->r_BcB_B.fill(0.0);
+
+    return;
+}
+
+/*! This is the destructor, nothing to report here */
+HubEffector::~HubEffector()
+{
+    return;
+}
+
+/*! @brief Validate the configured hub properties before the owning spacecraft initializes dynamics. */
+void HubEffector::validateConfiguration(bool pointMassTranslationalOnly)
+{
+    if (!std::isfinite(this->mHub) || this->mHub <= 0.0) {
+        bskLogger.bskError("hubEffector: mHub must be greater than 0 and finite.");
+    }
+    if (!this->r_BcB_B.allFinite()) {
+        bskLogger.bskError("hubEffector: r_BcB_B must contain only finite values.");
+    }
+    if (pointMassTranslationalOnly && (this->r_BcB_B.array() != 0.0).any()) {
+        bskLogger.bskError("hubEffector: pointMassTranslationalOnly requires r_BcB_B to be zero.");
+    }
+    if (!this->r_CN_NInit.allFinite()) {
+        bskLogger.bskError("hubEffector: r_CN_NInit must contain only finite values.");
+    }
+    if (!this->v_CN_NInit.allFinite()) {
+        bskLogger.bskError("hubEffector: v_CN_NInit must contain only finite values.");
+    }
+    if (!this->sigma_BNInit.allFinite()) {
+        bskLogger.bskError("hubEffector: sigma_BNInit must contain only finite values.");
+    }
+    if (!this->omega_BN_BInit.allFinite()) {
+        bskLogger.bskError("hubEffector: omega_BN_BInit must contain only finite values.");
+    }
+    if (!this->IHubPntBc_B.allFinite()) {
+        bskLogger.bskError("hubEffector: IHubPntBc_B must contain only finite values.");
+    }
+    if (!pointMassTranslationalOnly && !eigenIsValidInertiaMatrix(this->IHubPntBc_B)) {
+        bskLogger.bskError(
+            "hubEffector: IHubPntBc_B is not a valid inertia tensor. It may not have been set properly by the user.");
+    }
+}
+
+/*! This method allows the hub access to gravity and also gets access to the properties in the dyn Manager because uses
+ these values in the computeDerivatives method call
+ *
+ * @param[in] statesIn Dynamic parameter manager containing the required states.
+ */
+void HubEffector::linkInStates(DynParamManager& statesIn)
+{
+    this->g_N = statesIn.getPropertyReference("g_N");
+    return;
+}
+
+/*! This method allows the hub to register its states: r_BN_N, v_BN_N, sigma_BN and omega_BN_B
+ *
+ * @param[in,out] states Dynamic parameter manager used to register states or properties.
+ */
+void HubEffector::registerStates(DynParamManager& states)
+{
+    // - Register the hub states and set with initial values
+    this->posState = states.registerState(3, 1, this->nameOfHubPosition);
+    this->velocityState = states.registerState(3, 1, this->nameOfHubVelocity);
+    this->sigmaState = states.registerState(3, 1, this->nameOfHubSigma);
+    this->omegaState = states.registerState(3, 1, this->nameOfHubOmega);
+    this->gravVelocityState = states.registerState(3, 1, this->nameOfHubGravVelocity);
+    this->gravVelocityBcState = states.registerState(3, 1, this->nameOfBcGravVelocity);
+    /* - r_BN_N and v_BN_N are initialized from r_CN_N and v_CN_N, then
+     * corrected during spacecraft reset-time dynamics registration because
+     * points B and C are not necessarily coincident. */
+    this->posState->setState(this->r_CN_NInit);
+    this->velocityState->setState(this->v_CN_NInit);
+    this->sigmaState->setState(this->sigma_BNInit);
+    this->omegaState->setState(this->omega_BN_BInit);
+    this->gravVelocityState->setState(this->v_CN_NInit);
+    this->gravVelocityBcState->setState(this->v_CN_NInit);
+
+    return;
+}
+
+/*! This method allows the hub to register only translational states: r_BN_N and v_BN_N
+ *
+ * @param[in,out] states Dynamic parameter manager used to register states or properties.
+ */
+void HubEffector::registerTranslationalStates(DynParamManager& states)
+{
+    // - Register the hub translational states and set with initial values
+    this->posState = states.registerState(3, 1, this->nameOfHubPosition);
+    this->velocityState = states.registerState(3, 1, this->nameOfHubVelocity);
+
+    this->posState->setState(this->r_CN_NInit);
+    this->velocityState->setState(this->v_CN_NInit);
+
+    return;
+}
+
+/*! This method allows the hub to register fixed attitude states for point-mass dynamics with dynamic effectors
+ *
+ * @param[in,out] states Dynamic parameter manager used to register states or properties.
+ */
+void HubEffector::registerAttitudeStates(DynParamManager& states)
+{
+    this->sigmaState = states.registerState(3, 1, this->nameOfHubSigma);
+    this->omegaState = states.registerState(3, 1, this->nameOfHubOmega);
+
+    this->sigmaState->setState(this->sigma_BNInit);
+    this->omegaState->setState(this->omega_BN_BInit);
+
+    return;
+}
+
+/*! This method allows the hub to give its mass properties to the spacecraft
+ *
+ * @param[in] integTime [s] Current integration time.
+ */
+void HubEffector::updateEffectorMassProps(double integTime [[maybe_unused]])
+{
+    // - Give the mass to mass props
+    this->effProps.mEff = this->mHub;
+
+    // - Give inertia of hub about point B to mass props
+    this->effProps.IEffPntB_B =
+        this->IHubPntBc_B + this->mHub * eigenTilde(this->r_BcB_B) * eigenTilde(this->r_BcB_B).transpose();
+
+    // - Give position of center of mass of hub with respect to point B to mass props
+    this->effProps.rEff_CB_B = this->r_BcB_B;
+
+    // - Zero body derivatives for position and inertia;
+    this->effProps.rEffPrime_CB_B.setZero();
+    this->effProps.IEffPrimePntB_B.setZero();
+
+    return;
+}
+
+/*! This method is for computing the derivatives of the hub: rDDot_BN_N and omegaDot_BN_B, along with the kinematic
+ derivatives
+ *
+ * @param[in] integTime [s] Current integration time.
+ * @param[in] rDDot_BN_N [m/s^2] Hub translational acceleration expressed in inertial-frame components.
+ * @param[in] omegaDot_BN_B [rad/s^2] Hub angular acceleration expressed in body-frame components.
+ * @param[in] sigma_BN Hub attitude relative to the inertial frame.
+ */
+void HubEffector::computeDerivatives(double integTime [[maybe_unused]],
+                                     Eigen::Vector3d rDDot_BN_N [[maybe_unused]],
+                                     Eigen::Vector3d omegaDot_BN_B [[maybe_unused]],
+                                     Eigen::MRPd sigma_BN)
+{
+    // - Get variables from state manager
+    Eigen::Vector3d rDotLocal_BN_N;
+    Eigen::MRPd sigmaLocal_BN = sigma_BN;
+    Eigen::Vector3d omegaLocal_BN_B;
+    Eigen::Vector3d gLocal_N;
+    rDotLocal_BN_N = velocityState->stateView();
+    omegaLocal_BN_B = omegaState->stateView();
+    gLocal_N = *this->g_N;
+
+    // - Set kinematic derivative
+    // Derivative buffers do not alias the local values or back-substitution matrices.
+    sigmaState->derivativeView().noalias() = 1.0 / 4.0 * sigmaLocal_BN.Bmat() * omegaLocal_BN_B;
+
+    // - Define dcm's
+    Eigen::Matrix3d dcm_NB;
+    Eigen::Matrix3d dcm_BN;
+    dcm_NB = sigmaLocal_BN.toRotationMatrix();
+    dcm_BN = dcm_NB.transpose();
+
+    // - Solve for omegaDot_BN_B
+    const Eigen::Matrix3d matrixAInverse = this->hubBackSubMatrices.matrixA.inverse();
+    Eigen::Vector3d omegaDotLocal_BN_B;
+    Eigen::Matrix3d intermediateMatrix;
+    Eigen::Vector3d intermediateVector;
+    intermediateVector = this->hubBackSubMatrices.vecRot -
+                         this->hubBackSubMatrices.matrixC * matrixAInverse * this->hubBackSubMatrices.vecTrans;
+    intermediateMatrix =
+        hubBackSubMatrices.matrixD - hubBackSubMatrices.matrixC * matrixAInverse * hubBackSubMatrices.matrixB;
+    omegaDotLocal_BN_B = intermediateMatrix.inverse() * intermediateVector;
+    omegaState->setDerivative(omegaDotLocal_BN_B);
+
+    // - Solve for rDDot_BN_N
+    velocityState->derivativeView().noalias() =
+        dcm_NB * matrixAInverse * (hubBackSubMatrices.vecTrans - hubBackSubMatrices.matrixB * omegaDotLocal_BN_B);
+
+    // - Set gravity velocity derivatives
+    gravVelocityState->setDerivative(gLocal_N);
+    gravVelocityBcState->setDerivative(gLocal_N);
+
+    // - Set kinematic derivative
+    posState->setDerivative(rDotLocal_BN_N);
+
+    return;
+}
+
+/*! This method computes direct derivatives for a fixed-mass hub-only spacecraft whose body
+ frame origin is at the hub center of mass.
+ *
+ * @param[in] forceExternal_N [N] External force expressed in inertial-frame components.
+ * @param[in] forceExternal_B [N] External force expressed in body-frame components.
+ * @param[in] torquePntB_B [N*m] External torque about point B in body-frame components.
+ */
+void HubEffector::computeHubOnlyDerivatives(const Eigen::Vector3d& forceExternal_N,
+                                            const Eigen::Vector3d& forceExternal_B,
+                                            const Eigen::Vector3d& torquePntB_B)
+{
+    Eigen::Vector3d rDotLocal_BN_N = this->velocityState->stateView();
+    Eigen::MRPd sigmaLocal_BN;
+    sigmaLocal_BN = (Eigen::Vector3d)this->sigmaState->stateView();
+    Eigen::Vector3d omegaLocal_BN_B = this->omegaState->stateView();
+    Eigen::Matrix3d dcm_NB = sigmaLocal_BN.toRotationMatrix();
+
+    Eigen::Vector3d translationalAccel_N =
+        *this->g_N + (forceExternal_N + dcm_NB * forceExternal_B) / this->effProps.mEff;
+
+    // Compare values at use so resets and direct mass-property updates refresh the cache.
+    if (!this->hubOnlyInertiaValid || (this->hubOnlyInertia.array() != this->effProps.IEffPntB_B.array()).any()) {
+        this->hubOnlyInertiaLDLT.compute(this->effProps.IEffPntB_B);
+        this->hubOnlyInertia = this->effProps.IEffPntB_B;
+        this->hubOnlyInertiaValid = true;
+    }
+
+    Eigen::Vector3d rotAngularMomentumPntB_B = this->effProps.IEffPntB_B * omegaLocal_BN_B;
+    Eigen::Vector3d omegaDotLocal_BN_B =
+        this->hubOnlyInertiaLDLT.solve(torquePntB_B - omegaLocal_BN_B.cross(rotAngularMomentumPntB_B));
+
+    this->posState->setDerivative(rDotLocal_BN_N);
+    this->velocityState->setDerivative(translationalAccel_N);
+    this->sigmaState->derivativeView().noalias() = 1.0 / 4.0 * sigmaLocal_BN.Bmat() * omegaLocal_BN_B;
+    this->omegaState->setDerivative(omegaDotLocal_BN_B);
+    this->gravVelocityState->setDerivative(*this->g_N);
+    this->gravVelocityBcState->setDerivative(*this->g_N);
+
+    return;
+}
+
+/*! This method is for computing the energy and momentum contributions from the hub
+ *
+ * @param[in] integTime [s] Current integration time.
+ * @param[in,out] rotAngMomPntCContr_B [kg*m^2/s] Rotational angular momentum contribution.
+ * @param[in,out] rotEnergyContr [J] Rotational energy contribution.
+ * @param[in] omega_BN_B [rad/s] Hub angular velocity expressed in body-frame components.
+ */
+void HubEffector::updateEnergyMomContributions(double integTime [[maybe_unused]],
+                                               Eigen::Vector3d& rotAngMomPntCContr_B,
+                                               double& rotEnergyContr,
+                                               Eigen::Vector3d omega_BN_B [[maybe_unused]])
+{
+    // - Get variables needed for energy momentum calcs
+    Eigen::Vector3d omegaLocal_BN_B;
+    omegaLocal_BN_B = omegaState->stateView();
+
+    //  - Find rotational angular momentum contribution from hub
+    Eigen::Vector3d rDot_BcB_B;
+    rDot_BcB_B = omegaLocal_BN_B.cross(r_BcB_B);
+    rotAngMomPntCContr_B = IHubPntBc_B * omegaLocal_BN_B + mHub * r_BcB_B.cross(rDot_BcB_B);
+
+    // - Find rotational energy contribution from the hub
+    rotEnergyContr =
+        1.0 / 2.0 * omegaLocal_BN_B.dot(IHubPntBc_B * omegaLocal_BN_B) + 1.0 / 2.0 * mHub * rDot_BcB_B.dot(rDot_BcB_B);
+
+    return;
+}
+
+/*! This method is for switching the MRPs
+ *
+ * @param[in] integTime [s] Current integration time.
+ */
+void HubEffector::modifyStates(double integTime [[maybe_unused]])
+{
+    // Lets switch those MRPs!!
+    Eigen::MRPd sigmaBNLoc(this->sigmaState->stateView().data());
+    if (sigmaBNLoc.norm() > 1) {
+        sigmaBNLoc = sigmaBNLoc.shadow();
+        this->sigmaState->setState(sigmaBNLoc.coeffs());
+        this->MRPSwitchCount++;
+    }
+    return;
+}
+
+/*! This method is used to set the gravitational velocity state equal to the base velocity state
+ *
+ * @param[in] v_CN_N [m/s] Unused center-of-mass velocity retained for interface compatibility.
+ */
+void HubEffector::matchGravitytoVelocityState(Eigen::Vector3d v_CN_N)
+{
+    this->gravVelocityState->setState(this->velocityState->stateView());
+    this->gravVelocityBcState->setState(v_CN_N);
+}

@@ -1,0 +1,163 @@
+name: build
+description: >
+  Sets up a cross-platform build environment for Basilisk and performs
+  either a Conan-based build or a pip-based build.
+inputs:
+  python-version:
+    description: Python version
+    required: true
+  conan-args:
+    required: false
+    default: ""
+  save-conan-cache:
+    description: Save the shared platform cache; enable only for a full dependency producer.
+    required: false
+    default: false
+  is-canary:
+    description: If a canary build is being performed.
+    required: false
+    default: false
+  skip-build:
+    description: Used to do all build related setup, while skipping the actual build
+    required: false
+    default: false
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: "pip"
+        cache-dependency-path: |
+          requirements_dev.txt
+          requirements_doc.txt
+          requirements.txt
+          .github/workflows/requirements_dev.txt
+          .github/workflows/requirements_doc.txt
+          .github/workflows/requirements.txt
+
+    - name: Setup system dependencies
+      uses: ./.github/actions/setup
+
+    - name: Prepare macOS Rust tools
+      if: ${{ runner.os == 'macOS' && contains(inputs.conan-args, '--rustModules True') }}
+      shell: bash
+      run: python .github/scripts/setup_macos_rust.py
+
+    - name: Install requirements
+      shell: bash
+      run: |
+        if [[ "${{ inputs.is-canary }}" == 'true' ]]; then
+          pip install -r .github/workflows/requirements.txt -r .github/workflows/requirements_dev.txt
+        else
+          pip install -r requirements.txt -r requirements_dev.txt
+        fi
+
+    - name: Install Ninja
+      shell: bash
+      run: pip install ninja
+
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.10
+      continue-on-error: true
+      with:
+        disable_annotations: true
+
+    - name: Set sccache as compiler launcher
+      shell: bash
+      run: |
+        if command -v sccache >/dev/null 2>&1; then
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "CMAKE_C_COMPILER_LAUNCHER=sccache" >> $GITHUB_ENV
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache" >> $GITHUB_ENV
+        else
+          echo "sccache is unavailable; continuing without compiler caching"
+        fi
+        if [[ "${{ runner.os }}" == 'Windows' ]]; then
+          echo "CMAKE_BUILD_PARALLEL_LEVEL=$(python -c 'import os; print(os.cpu_count() or 1)')" >> $GITHUB_ENV
+        fi
+
+    - name: Reset sccache statistics
+      continue-on-error: true
+      shell: bash
+      run: |
+        if command -v sccache >/dev/null 2>&1; then
+          sccache --zero-stats
+        fi
+
+    - name: Prepare Conan cache context
+      id: conan-context
+      shell: bash
+      env:
+        RUNNER_ARCH: ${{ runner.arch }}
+      run: python .github/scripts/configure_conan_profile.py --emit-cache-fingerprint
+
+    - name: Restore Conan cache
+      id: conan-cache
+      continue-on-error: true
+      uses: actions/cache/restore@v5
+      with:
+        path: ~/.conan2
+        key: conan-v4-${{ runner.os }}-${{ runner.arch }}-${{ steps.conan-context.outputs.fingerprint }}-${{ hashFiles('conan.lock', 'conanfile.py', 'libs/**') }}
+        restore-keys: |
+          conan-v4-${{ runner.os }}-${{ runner.arch }}-${{ steps.conan-context.outputs.fingerprint }}-
+          conan-v3-${{ runner.os }}-${{ runner.arch }}-py${{ inputs.python-version }}-${{ steps.conan-context.outputs.fingerprint }}-
+          conan-v3-${{ runner.os }}-${{ runner.arch }}-py${{ inputs.python-version }}-
+          conan-v2-${{ runner.os }}-py${{ inputs.python-version }}-${{ github.job }}-
+          conan-v2-${{ runner.os }}-py${{ inputs.python-version }}-
+          conan-${{ runner.os }}-py${{ inputs.python-version }}-
+
+    - name: Refresh Conan configuration
+      shell: bash
+      run: |
+        python .github/scripts/configure_conan_profile.py
+        python .github/scripts/configure_conan_retries.py
+
+    - name: Build Basilisk
+      shell: bash
+      if: ${{ inputs.skip-build == 'false' }}
+      env:
+        CONAN_ARGS: "${{ inputs.conan-args }} --buildTesting True --verbose"
+      run: |
+        if [[ "${{ inputs.is-canary }}" == 'true' ]]; then
+          pip install --no-build-isolation --no-deps -e ".[examples]" -v
+        else
+          pip install --no-build-isolation -e ".[examples]" -v
+        fi
+        bskLargeData
+
+    - name: Verify installed Basilisk version
+      shell: bash
+      if: ${{ inputs.skip-build == 'false' }}
+      run: |
+        python -I - <<'PY'
+        from importlib.metadata import version
+        import Basilisk
+
+        build_version = Basilisk.getBuildInfo()["artifact"]["basiliskVersion"]
+        installed_version = version("bsk")
+        if not build_version == Basilisk.__version__ == installed_version:
+            raise SystemExit(
+                f"installed version mismatch: build={build_version!r}, "
+                f"runtime={Basilisk.__version__!r}, installed={installed_version!r}"
+            )
+        print("OK installed Basilisk version", build_version)
+        PY
+
+    - name: Save Conan cache
+      if: ${{ success() && inputs.skip-build == 'false' && inputs.save-conan-cache == 'true' && steps.conan-cache.outcome == 'success' && steps.conan-cache.outputs.cache-hit != 'true' }}
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        path: ~/.conan2
+        key: ${{ steps.conan-cache.outputs.cache-primary-key }}
+
+    - name: Show sccache statistics
+      if: ${{ always() }}
+      continue-on-error: true
+      shell: bash
+      run: |
+        if command -v sccache >/dev/null 2>&1; then
+          sccache --show-stats
+        fi

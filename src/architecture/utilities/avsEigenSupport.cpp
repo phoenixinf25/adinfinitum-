@@ -1,0 +1,434 @@
+/*
+ ISC License
+
+ Copyright (c) 2016, Autonomous Vehicle Systems Lab, University of Colorado at Boulder
+
+ Permission to use, copy, modify, and/or distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+ */
+
+#include "avsEigenSupport.h"
+#include "architecture/utilities/macroDefinitions.h"
+#include "rigidBodyKinematics.h"
+#include <cmath>
+#include <iostream>
+#include <math.h>
+
+/*
+
+ Contains various support algorithms related to using the Eigen Library
+
+ */
+
+/*! Copy a dynamic Eigen matrix into a row-major C array without an intermediate
+    transpose.
+
+    @param inMat Source Eigen matrix.
+    @param outArray Destination array sized by the caller.
+*/
+void eigenMatrixXd2CArray(const Eigen::MatrixXd& inMat, double* outArray)
+{
+    using RowMajorMatrixXd = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    Eigen::Map<RowMajorMatrixXd> outMat(outArray, inMat.rows(), inMat.cols());
+    outMat = inMat;
+}
+
+/*! Copy a dynamic integer Eigen matrix into a row-major C array without an
+    intermediate transpose.
+
+    @param inMat Source Eigen matrix.
+    @param outArray Destination array sized by the caller.
+*/
+void eigenMatrixXi2CArray(const Eigen::MatrixXi& inMat, int* outArray)
+{
+    using RowMajorMatrixXi = Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    Eigen::Map<RowMajorMatrixXi> outMat(outArray, inMat.rows(), inMat.cols());
+    outMat = inMat;
+}
+
+/*! Copy an Eigen 3-vector into a C array.
+
+    @param inMat Source Eigen vector.
+    @param outArray Destination three-element array.
+*/
+void eigenVector3d2CArray(const Eigen::Vector3d& inMat, double* outArray)
+{
+    Eigen::Map<Eigen::Vector3d> outVector(outArray);
+    outVector = inMat;
+}
+
+/*! Copy an Eigen MRP vector into a C array.
+
+    @param inMat Source Eigen MRP vector.
+    @param outArray Destination three-element array.
+*/
+void eigenMRPd2CArray(const Eigen::MRPd& inMat, double* outArray)
+{
+    Eigen::Map<Eigen::Vector3d> outVector(outArray);
+    outVector = inMat.coeffs();
+}
+
+/*! Copy an Eigen 3x3 matrix into a row-major C array.
+
+    @param inMat Source Eigen matrix.
+    @param outArray Destination nine-element array.
+*/
+void eigenMatrix3d2CArray(const Eigen::Matrix3d& inMat, double* outArray)
+{
+    using RowMajorMatrix3d = Eigen::Matrix<double, 3, 3, Eigen::RowMajor>;
+    Eigen::Map<RowMajorMatrix3d> outMat(outArray);
+    outMat = inMat;
+}
+
+/*! Convert a column-major C array into a dynamic Eigen matrix.
+
+    @param inArray Source array.
+    @param nRows Number of matrix rows.
+    @param nCols Number of matrix columns.
+    @return Dynamic Eigen matrix containing the source values.
+*/
+Eigen::MatrixXd cArray2EigenMatrixXd(double* inArray, int nRows, int nCols)
+{
+    return Eigen::Map<Eigen::MatrixXd>(inArray, nRows, nCols);
+}
+
+/*! Convert a C array into an Eigen 3-vector.
+
+    @param inArray Source three-element array.
+    @return Eigen vector containing the source values.
+*/
+Eigen::Vector3d cArray2EigenVector3d(double* inArray)
+{
+    return Eigen::Map<Eigen::Vector3d>(inArray, 3, 1);
+}
+
+/*! Convert a C array into an Eigen MRP.
+
+    @param inArray Source three-element array.
+    @return Eigen MRP containing the source values.
+*/
+Eigen::MRPd cArray2EigenMRPd(const double* inArray)
+{
+    return Eigen::MRPd(inArray);
+}
+
+/*! Convert a row-major C array into an Eigen 3x3 matrix.
+
+    @param inArray Source nine-element array.
+    @return Eigen matrix containing the source values.
+*/
+Eigen::Matrix3d cArray2EigenMatrix3d(double* inArray)
+{
+    using RowMajorMatrix3d = Eigen::Matrix<double, 3, 3, Eigen::RowMajor>;
+    return Eigen::Map<RowMajorMatrix3d>(inArray);
+}
+
+/*! Convert a C 3x3 array into an Eigen 3x3 matrix.
+
+    @param in2DArray Source 3x3 array.
+    @return Eigen matrix containing the source values.
+*/
+Eigen::Matrix3d c2DArray2EigenMatrix3d(double in2DArray[3][3])
+{
+    using RowMajorMatrix3d = Eigen::Matrix<double, 3, 3, Eigen::RowMajor>;
+    return Eigen::Map<RowMajorMatrix3d>(&in2DArray[0][0]);
+}
+
+/*! This function returns the Eigen DCM that corresponds to a 1-axis rotation
+ by the angle theta.  The DCM is the positive theta rotation from the original
+ frame to the final frame.
+ @return Eigen::Matrix3d
+ @param angle The input rotation angle
+ */
+Eigen::Matrix3d eigenM1(double angle)
+{
+    Eigen::Matrix3d mOut;
+
+    mOut.setIdentity();
+
+    mOut(1, 1) = cos(angle);
+    mOut(1, 2) = sin(angle);
+    mOut(2, 1) = -mOut(1, 2);
+    mOut(2, 2) = mOut(1, 1);
+
+    return mOut;
+}
+
+/*! This function returns the Eigen DCM that corresponds to a 2-axis rotation
+ by the angle theta.  The DCM is the positive theta rotation from the original
+ frame to the final frame.
+ @return Eigen::Matrix3d
+ @param angle The input rotation angle
+ */
+Eigen::Matrix3d eigenM2(double angle)
+{
+    Eigen::Matrix3d mOut;
+
+    mOut.setIdentity();
+
+    mOut(0, 0) = cos(angle);
+    mOut(0, 2) = -sin(angle);
+    mOut(2, 0) = -mOut(0, 2);
+    mOut(2, 2) = mOut(0, 0);
+
+    return mOut;
+}
+
+/*! This function returns the Eigen DCM that corresponds to a 3-axis rotation
+ by the angle theta.  The DCM is the positive theta rotation from the original
+ frame to the final frame.
+ @return Eigen::Matrix3d
+ @param angle The input rotation angle
+ */
+Eigen::Matrix3d eigenM3(double angle)
+{
+    Eigen::Matrix3d mOut;
+
+    mOut.setIdentity();
+
+    mOut(0, 0) = cos(angle);
+    mOut(0, 1) = sin(angle);
+    mOut(1, 0) = -mOut(0, 1);
+    mOut(1, 1) = mOut(0, 0);
+
+    return mOut;
+}
+
+/*! This function returns the tilde matrix version of a vector. The tilde
+ matrix is the matrixi equivalent of a vector cross product, where
+ [tilde_a] b == a x b
+ @return Eigen::Matrix3d
+ @param vec The input vector
+ */
+Eigen::Matrix3d eigenTilde(Eigen::Vector3d vec)
+{
+    Eigen::Matrix3d mOut;
+
+    mOut(0, 0) = mOut(1, 1) = mOut(2, 2) = 0.0;
+
+    mOut(0, 1) = -vec(2);
+    mOut(1, 0) = vec(2);
+    mOut(0, 2) = vec(1);
+    mOut(2, 0) = -vec(1);
+    mOut(1, 2) = -vec(0);
+    mOut(2, 1) = vec(0);
+
+    return mOut;
+}
+
+/*! This function converts the Eigen DCM to an Eigen MRPd
+ @return Eigen::MRPd
+ @param dcm_Eigen The input DCM
+ */
+Eigen::MRPd eigenC2MRP(Eigen::Matrix3d dcm_Eigen)
+{
+    Eigen::MRPd sigma_Eigen; // output Eigen MRP
+    double dcm_Array[9];     // C array DCM
+    double sigma_Array[3];   // C array MRP
+
+    eigenMatrix3d2CArray(dcm_Eigen, dcm_Array);
+    C2MRP(RECAST3X3 dcm_Array, sigma_Array);
+    sigma_Eigen = cArray2EigenMRPd(sigma_Array);
+
+    return sigma_Eigen;
+}
+
+/*! This function converts the Eigen MRPd to Vector3d
+ @return Eigen::Vector3d
+ @param mrp The input Vector3d variable
+ */
+Eigen::Vector3d eigenMRPd2Vector3d(Eigen::MRPd mrp)
+{
+    Eigen::Vector3d vec3d;
+
+    vec3d[0] = mrp.x();
+    vec3d[1] = mrp.y();
+    vec3d[2] = mrp.z();
+
+    return vec3d;
+}
+
+/*! This function solves for the zero of the passed function using the Newton Raphson Method
+@return double
+@param initialEstimate The initial value to use for newton-raphson
+@param accuracy The desired upper bound for the error
+@param f Function to find the zero of
+@param fPrime First derivative of the function
+*/
+double newtonRaphsonSolve(const double& initialEstimate,
+                          const double& accuracy,
+                          const std::function<double(double)>& f,
+                          const std::function<double(double)>& fPrime)
+{
+    double currentEstimate = initialEstimate;
+    for (int i = 0; i < 100; i++) {
+        if (std::abs(f(currentEstimate)) < accuracy)
+            break;
+
+        double functionVal = f(currentEstimate);
+        double functionDeriv = fPrime(currentEstimate);
+        currentEstimate = currentEstimate - functionVal / functionDeriv;
+    }
+    return currentEstimate;
+}
+
+/*! This function solves for the zero of the passed function using the Bisection Method
+@return double
+@param interval The interval to use for the bisection method. Note that the root of the function must be inside this
+interval
+@param accuracy The desired upper bound for the error
+@param f Function to find the zero of
+*/
+double bisectionSolve(double* interval, double accuracy, std::function<double(double)>& f)
+{
+    BSKLogger bskLogger;
+    double left = interval[0];
+    double right = interval[1];
+    double currentEstimate = (left + right) / 2.0;
+    const bool accuracyIsFinite = std::isfinite(accuracy);
+    const bool accuracyIsPositive = accuracy > 0.0;
+    if (!accuracyIsFinite || !accuracyIsPositive) {
+        bskLogger.bskError("avsEigenSupport.bisectionSolve: accuracy must be finite and strictly positive");
+    }
+    const bool leftIsFinite = std::isfinite(left);
+    const bool rightIsFinite = std::isfinite(right);
+    if (!leftIsFinite || !rightIsFinite) {
+        bskLogger.bskError("avsEigenSupport.bisectionSolve: interval bounds must be finite");
+    }
+    // check if interval is good
+    if (left > right) {
+        bskLogger.bskError("avsEigenSupport.bisectionSolve: Interval must be from left to right");
+    }
+    double fLeft = f(left);
+    double fRight = f(right);
+    if (fLeft == 0.0) {
+        return left;
+    }
+    if (fRight == 0.0) {
+        return right;
+    }
+    // check if interval has opposite signs
+    if ((fLeft * fRight) > 0) {
+        bskLogger.bskError(
+            "avsEigenSupport.bisectionSolve: function values at interval bounds must have opposite signs");
+    }
+    // find root
+    while ((right - left) >= accuracy) {
+        // midpoint
+        currentEstimate = (left + right) / 2.0;
+        double fMid = f(currentEstimate);
+        // if midpoint is root, root is found
+        if (fMid == 0.0) {
+            break;
+        } else if ((fLeft < 0.0 && fMid > 0.0) || (fLeft > 0.0 && fMid < 0.0)) {
+            right = currentEstimate;
+            fRight = fMid;
+        } else {
+            left = currentEstimate;
+            fLeft = fMid;
+        }
+    }
+    return currentEstimate;
+}
+
+/*! This function returns true if the provided 3x3 matrix is a proper rotation
+    matrix, i.e. it is orthonormal (DCM^T * DCM == identity) and right-handed
+    (determinant == +1), within the given tolerance.
+    @param dcm matrix to test
+    @param tolerance allowed deviation from orthonormality and from a +1 determinant
+    @return bool
+ */
+bool eigenIsRotationMatrix(const Eigen::Matrix3d& dcm, double tolerance)
+{
+    bool isOrthonormal = (dcm.transpose() * dcm - Eigen::Matrix3d::Identity()).norm() <= tolerance;
+    bool isRightHanded = std::abs(dcm.determinant() - 1.0) <= tolerance;
+    return isOrthonormal && isRightHanded;
+}
+
+/*! This function returns true if the provided 3-vector has unit norm within the
+    given tolerance.
+    @param vec vector to test
+    @param tolerance allowed deviation of the norm from 1.0
+    @return bool
+ */
+bool eigenIsUnitVector(const Eigen::Vector3d& vec, double tolerance)
+{
+    return std::abs(vec.norm() - 1.0) <= tolerance;
+}
+
+/*! This function returns true if the provided 3x3 matrix is a valid inertia
+    tensor, i.e.
+    (1) it contains finite values,
+    (2) it is symmetric (within tolerance),
+    (3) it contains at most one zero eigenvalue,
+    (4) it is positive semi-definite (within tolerance),
+    (5) its principal inertia values are consistent (within tolerance).
+    @param inertia matrix to test
+    @param tolerance allowed deviation in checks
+    @return bool
+ */
+bool eigenIsValidInertiaMatrix(const Eigen::Matrix3d& inertia, double tolerance)
+{
+    // Finiteness check
+    if (!inertia.allFinite()) {
+        return false;
+    }
+
+    // Symmetric check
+    if ((inertia - inertia.transpose()).norm() > tolerance) {
+        return false;
+    }
+
+    // Check that at most one eigenvalue can be zero
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigenSolver(inertia);
+    if (eigenSolver.info() != Eigen::Success) {
+        return false;
+    }
+    const Eigen::Vector3d eigenvalues = eigenSolver.eigenvalues();
+    if (eigenvalues[1] <= tolerance * eigenvalues[2]) {
+        return false;
+    }
+
+    // Principal inertia check - triangle inequality
+    // Also covers positive semi-definite check: eigenvalues are ascending, so
+    // passing this requires eigenvalues[0] >= -tolerance * eigenvalues[2]
+    if (eigenvalues[0] + eigenvalues[1] < eigenvalues[2] * (1.0 - tolerance)) {
+        return false;
+    }
+
+    return true;
+}
+
+/*! This function returns true if the provided 3x3 matrix contains only finite
+    values and is symmetric positive semidefinite within the given tolerance.
+    The tolerance bounds both the deviation from symmetry and small negative
+    eigenvalues caused by roundoff.
+
+    @param matrix matrix to test
+    @param tolerance allowed deviation from symmetry and positive semidefiniteness
+    @return ``true`` when the matrix is symmetric positive semidefinite
+ */
+bool eigenIsPositiveSemidefiniteMatrix(const Eigen::Matrix3d& matrix, double tolerance)
+{
+    if (!matrix.allFinite()) {
+        return false;
+    }
+    if ((matrix - matrix.transpose()).norm() > tolerance) {
+        return false;
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(matrix);
+    if (solver.info() != Eigen::Success) {
+        return false;
+    }
+    return solver.eigenvalues().minCoeff() >= -tolerance;
+}

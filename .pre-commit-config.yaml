@@ -1,0 +1,51 @@
+repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v2.3.0
+    hooks:
+      -   id: trailing-whitespace
+      -   id: end-of-file-fixer
+      -   id: check-yaml
+      -   id: check-added-large-files
+          args: ['--maxkb=10000']
+      -   id: check-case-conflict
+      -   id: check-merge-conflict
+      -   id: debug-statements
+-   repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v22.1.5
+    hooks:
+      -   id: clang-format
+          types_or: [c, c++]
+          args: [--style=file]
+-   repo: local
+    hooks:
+      -   id: rustfmt
+          name: Check Rust formatting
+          entry: python src/utilities/preCommitTools/checkRustFormatting.py
+          language: python
+          files: '(^|/)(.*\.rs|\.?rustfmt\.toml)$'
+          pass_filenames: false
+      -   id: rust-third-party-licenses
+          name: Check Rust third-party license report
+          entry: python src/architecture/rust/generate_rust_licenses.py --check
+          language: python
+          files: '^(src/Cargo\.(toml|lock)|src/.*/Cargo\.toml|src/architecture/rust/(generate_rust_licenses\.py|licenses/about\.toml)|LICENSES/RUST-THIRD-PARTY\.txt)$'
+          pass_filenames: false
+      -   id: check-supportdata-registry
+          name: Ensure supportData registrySnippet.py is updated
+          entry: python src/utilities/supportDataTools/checkSync.py
+          language: python
+          files: ^supportData/
+          pass_filenames: false
+      -   id: check-commit-message-prefix
+          name: Ensure commit message starts with [#xxxx]
+          entry: python src/utilities/preCommitTools/checkCommitMessage.py
+          language: python
+          stages: [commit-msg]
+      -   id: usage-metrics-tests
+          name: Test usage metrics collector
+          entry: >-
+            python -m unittest discover -s .github/scripts/tests
+            -p test_collect_usage_metrics.py
+          language: python
+          files: '^\.github/(scripts|workflows/usage-metrics\.yml)'
+          pass_filenames: false

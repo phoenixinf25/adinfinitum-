@@ -1,0 +1,424 @@
+// ISC License
+//
+// Copyright (c) 2026, Autonomous Vehicle Systems Lab, University of Colorado at Boulder
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+// ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+// OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+//! Basic Rust Basilisk module template.
+
+#![allow(non_snake_case)]
+
+use bsk_messages::*;
+
+/// Nested Python-visible parameters used to demonstrate grouped configuration.
+#[repr(C)]
+#[derive(Clone, Copy, Default, bsk_build::BskConfigValue)]
+pub struct RustModuleTemplateParameters {
+    /// [-] Multiplicative sample coefficient
+    pub gain: f64,
+    /// [-] Additive sample coefficient
+    pub offset: f64,
+}
+
+/// Boolean configuration alias; Python still receives ordinary bool values.
+pub type RustModuleTemplateFlag = bool;
+/// Alias chain used by the two-dimensional Boolean configuration example.
+pub type RustModuleTemplateFlagAlias = RustModuleTemplateFlag;
+
+/// Rust module configuration and message ports.
+#[bsk_build::module]
+#[repr(C)]
+pub struct RustModuleTemplateConfig {
+    /// [-] Python-visible sample counter
+    pub dummy: f64,
+    /// [-] Positive amount added to the sample counter on each update
+    #[bsk(validate = validate_increment)]
+    pub increment: f64,
+    /// [-] Nested, by-value sample configuration
+    #[bsk(validate = validate_sample_parameters)]
+    pub sampleParameters: RustModuleTemplateParameters,
+    /// [-] Two-dimensional sample configuration array
+    #[bsk(validate = validate_sample_matrix)]
+    pub sampleMatrix: [[f64; 3]; 2],
+    /// [-] Optional input message
+    #[bsk(optional)]
+    pub dataInMsg: MsgReader<CModuleTemplateMsg>,
+    /// [-] Fixed-size array of optional input messages
+    #[bsk(optional)]
+    pub dataInMsgs: [MsgReader<CModuleTemplateMsg>; 2],
+    /// [-] Individual output written from the returned ``dataOutMsg`` value
+    pub dataOutMsg: MsgWriter<CModuleTemplateMsg>,
+    /// [-] Output array written element-by-element from returned ``dataOutMsgs``
+    pub dataOutMsgs: [MsgWriter<CModuleTemplateMsg>; 2],
+    /// [-] Deprecated sample parameter retained to demonstrate migration warnings
+    #[bsk(deprecated(removal_date = "2027/07/24", message = "Use dummy instead."))]
+    pub legacyDummy: f64,
+    /// [-] Test-only fault injection that deliberately panics during update
+    pub panicOnUpdate: bool,
+    /// Boolean array illustrating configuration through a type alias
+    pub sampleFlags: [RustModuleTemplateFlag; 3],
+    /// Boolean matrix illustrating configuration through an alias chain
+    pub sampleFlagMatrix: [[RustModuleTemplateFlagAlias; 2]; 2],
+    /// [-] Fixed-size configuration array larger than 32 elements
+    #[bsk(validate = validate_sample_array)]
+    pub sampleArray: [f64; 64],
+}
+
+/// Validate a proposed value before the generated ``increment`` setter stores it.
+///
+/// :param config: Current module configuration, available for cross-field checks.
+/// :param increment: Proposed sample-counter increment [-].
+/// :returns: Success when the proposed increment is finite and positive.
+fn validate_increment(_config: &RustModuleTemplateConfig, increment: &f64) -> BskResult<()> {
+    if !increment.is_finite() || *increment <= 0.0 {
+        return Err(BskError::new(
+            "rustModuleTemplate.increment must be finite and strictly positive",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate nested sample parameters before the generated setter stores them.
+///
+/// :param config: Current module configuration, available for cross-field checks.
+/// :param parameters: Proposed grouped sample parameters [-].
+/// :returns: Success when every parameter is finite.
+fn validate_sample_parameters(
+    _config: &RustModuleTemplateConfig,
+    parameters: &RustModuleTemplateParameters,
+) -> BskResult<()> {
+    if !parameters.gain.is_finite() || !parameters.offset.is_finite() {
+        return Err(BskError::new(
+            "rustModuleTemplate.sampleParameters components must be finite",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a two-dimensional sample array before storing it.
+///
+/// :param config: Current module configuration, available for cross-field checks.
+/// :param matrix: Proposed two-by-three sample matrix [-].
+/// :returns: Success when every matrix element is finite.
+fn validate_sample_matrix(
+    _config: &RustModuleTemplateConfig,
+    matrix: &[[f64; 3]; 2],
+) -> BskResult<()> {
+    if matrix
+        .iter()
+        .flatten()
+        .any(|component| !component.is_finite())
+    {
+        return Err(BskError::new(
+            "rustModuleTemplate.sampleMatrix components must be finite",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate every element of the larger sample array before storing it.
+///
+/// :param _config: Current module configuration, unused by this validator.
+/// :param values: Proposed 64-element sample array [-].
+/// :returns: Success when every element is finite.
+fn validate_sample_array(_config: &RustModuleTemplateConfig, values: &[f64; 64]) -> BskResult<()> {
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(BskError::new(
+            "rustModuleTemplate.sampleArray components must be finite",
+        ));
+    }
+    Ok(())
+}
+
+/// Rust-owned state that is never exposed through C, C++, or Python.
+///
+/// Unlike the configuration view, this type does not use ``#[repr(C)]`` and
+/// may contain ordinary Rust collections, strings, enums, and other safe
+/// implementation details.
+pub struct RustModuleTemplateState {
+    /// [-] History retained across update calls
+    update_history: Vec<f64>,
+    /// [rad] Sample angle used to demonstrate a safe Basilisk utility
+    sample_angle: f64,
+    /// [rad] Sample angle mapped into the principal interval
+    wrapped_angle: f64,
+    /// Description of the most recent lifecycle event
+    last_event: String,
+    /// Internal operating mode represented by a Rust enum
+    mode: TemplateMode,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TemplateMode {
+    Idle,
+    Running,
+}
+
+impl Default for RustModuleTemplateState {
+    fn default() -> Self {
+        Self {
+            update_history: Vec::new(),
+            sample_angle: 4.0,  // [rad]
+            wrapped_angle: 0.0, // [rad]
+            last_event: String::from("created"),
+            mode: TemplateMode::Idle,
+        }
+    }
+}
+
+impl BskModule for RustModuleTemplateConfig {
+    type State = RustModuleTemplateState;
+    type Inputs = RustModuleTemplateInputs;
+    type Outputs = RustModuleTemplateOutputs;
+
+    fn init(&mut self, _state: &mut Self::State) -> BskResult<()> {
+        // Before init runs, every configuration field and the private state
+        // have been initialized in Rust. Arrays initialize each element, so
+        // sampleArray needs no special handling for its 64 entries. Numeric
+        // values are zero, booleans are false, and message ports are empty.
+        // Nested parameter structs and private state use their Default
+        // implementations, which may define other defaults. Set non-zero
+        // configuration defaults here before Python configures the module.
+        self.increment = 1.0; // [-]
+        Ok(())
+    }
+
+    fn reset(
+        &mut self,
+        state: &mut Self::State,
+        context: &BskContext<'_>,
+        current_sim_nanos: u64,
+    ) -> BskResult<Self::Outputs> {
+        // Validate Python-visible configuration before the simulation runs.
+        // Return BskError for expected failures instead of panicking.
+        validate_increment(self, &self.increment)?;
+        validate_sample_parameters(self, &self.sampleParameters)?;
+        validate_sample_matrix(self, &self.sampleMatrix)?;
+        validate_sample_array(self, &self.sampleArray)?;
+
+        // Reset both Python-visible configuration and private Rust state.
+        self.dummy = 0.0; // [-]
+        state.update_history.clear();
+        state.last_event = format!("reset at {current_sim_nanos} ns");
+        state.mode = TemplateMode::Running;
+        context.logger().info("Variable dummy set to 0 in reset.");
+
+        // Default outputs contain None for every port, so reset changes state
+        // without publishing a message. Return Some(payload) for any output
+        // that should instead receive an explicit reset value.
+        Ok(RustModuleTemplateOutputs::default())
+    }
+
+    fn update(
+        &mut self,
+        state: &mut Self::State,
+        context: &BskContext<'_>,
+        inputs: Self::Inputs,
+        current_sim_nanos: u64,
+    ) -> BskResult<Self::Outputs> {
+        // This template-only hook exercises generated panic containment.
+        // Normal modules should return BskError for expected failures.
+        if self.panicOnUpdate {
+            panic!("deliberate rustModuleTemplate update panic");
+        }
+
+        // Optional input ports arrive as Option<Message>. Use a default
+        // payload for each input that is not connected.
+        let mut data_out_msg = inputs.dataInMsg.unwrap_or_default();
+        let mut data_out_msgs = inputs
+            .dataInMsgs
+            .map(|input_message| input_message.unwrap_or_default());
+
+        // The context provides framework services without adding fields to
+        // the Python-visible configuration.
+        if state.mode == TemplateMode::Idle {
+            context.logger().warning("Update called before reset.");
+            state.mode = TemplateMode::Running;
+        }
+
+        // Update both public sample data and unrestricted private Rust state.
+        self.dummy += self.increment;
+        state.update_history.push(self.dummy);
+        state.wrapped_angle = bsk_utilities::attitude::wrap_to_pi(state.sample_angle);
+        state.last_event = format!(
+            "module {} updated at {current_sim_nanos} ns",
+            context.module_id()
+        );
+
+        // Construct one individual output and one fixed-size output array.
+        data_out_msg.dataVector[0] += self.dummy;
+        for output_message in &mut data_out_msgs {
+            output_message.dataVector[0] += self.dummy;
+        }
+
+        // Some(payload) publishes that named output; None would leave the port
+        // unchanged for this update. Array elements are selected independently.
+        // The generated lifecycle supplies module ID, timestamp, and isWritten.
+        Ok(RustModuleTemplateOutputs {
+            dataOutMsg: Some(data_out_msg),
+            dataOutMsgs: data_out_msgs.map(Some),
+        })
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Optional template-specific Rust tests
+// -----------------------------------------------------------------------------
+//
+// This in-file test module is not required by the Rust module interface and is
+// not compiled into the Basilisk module library. It is included because
+// rustModuleTemplate is also a regression target for generated configuration
+// layout, named message values, Rust-owned state, lifecycle context services,
+// and expected-error handling. A new module does not need to copy these tests,
+// but it should provide tests appropriate for its own behavior as described in
+// the Rust module development guide.
+#[cfg(all(test, target_pointer_width = "64"))]
+mod tests {
+    use super::*;
+    use core::mem::{align_of, offset_of, size_of};
+
+    /// Verify that only Python-facing parameters and ports cross the config ABI.
+    #[test]
+    fn config_abi_contains_only_public_module_fields() {
+        assert_eq!(size_of::<RustModuleTemplateParameters>(), 16);
+        assert_eq!(align_of::<RustModuleTemplateParameters>(), 8);
+        assert_eq!(offset_of!(RustModuleTemplateParameters, gain), 0);
+        assert_eq!(offset_of!(RustModuleTemplateParameters, offset), 8);
+
+        assert_eq!(size_of::<RustModuleTemplateConfig>(), 1040);
+        assert_eq!(align_of::<RustModuleTemplateConfig>(), 8);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, dummy), 0);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, increment), 8);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, sampleParameters), 16);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, sampleMatrix), 32);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, dataInMsg), 80);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, dataInMsgs), 152);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, dataOutMsg), 296);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, dataOutMsgs), 368);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, legacyDummy), 512);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, panicOnUpdate), 520);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, sampleFlags), 521);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, sampleFlagMatrix), 524);
+        assert_eq!(offset_of!(RustModuleTemplateConfig, sampleArray), 528);
+    }
+
+    /// Verify that generated input and output values use the config port names.
+    #[test]
+    fn generated_io_values_are_named_by_port() {
+        let inputs = RustModuleTemplateInputs {
+            dataInMsg: None,
+            dataInMsgs: [None; 2],
+        };
+        assert!(inputs.dataInMsg.is_none());
+        assert!(inputs.dataInMsgs.iter().all(Option::is_none));
+
+        let outputs = RustModuleTemplateOutputs::default();
+        assert!(outputs.dataOutMsg.is_none());
+        assert!(outputs.dataOutMsgs.iter().all(Option::is_none));
+    }
+
+    /// Show how pure Rust tests obtain framework metadata and logging services.
+    #[test]
+    fn testing_context_provides_runtime_services() {
+        let runtime = BskModuleRuntime::for_testing();
+        let context = BskContext::for_testing(&runtime);
+
+        assert_eq!(context.module_id(), 0);
+        assert_eq!(context.model_tag(), "");
+        assert_eq!(context.call_counts(), 0);
+        assert_eq!(context.rng_seed(), 0);
+        context
+            .logger()
+            .info("Rust module test context is available.");
+    }
+
+    /// Demonstrate that internal module state can use unrestricted Rust types.
+    #[test]
+    fn internal_state_remains_outside_the_ffi_config() {
+        let runtime = BskModuleRuntime::for_testing();
+        let context = BskContext::for_testing(&runtime);
+        let mut config = RustModuleTemplateConfig {
+            dummy: 99.0,    // [-]
+            increment: 1.0, // [-]
+            sampleParameters: RustModuleTemplateParameters::default(),
+            sampleMatrix: [[0.0; 3]; 2], // [-]
+            dataInMsg: MsgReader::default(),
+            dataInMsgs: core::array::from_fn(|_| MsgReader::default()),
+            dataOutMsg: MsgWriter::default(),
+            dataOutMsgs: core::array::from_fn(|_| MsgWriter::default()),
+            legacyDummy: 0.0, // [-]
+            panicOnUpdate: false,
+            sampleFlags: [false; 3],
+            sampleFlagMatrix: [[false; 2]; 2],
+            sampleArray: [0.0; 64], // [-]
+        };
+        let mut state = RustModuleTemplateState::default();
+
+        let reset_outputs = config
+            .reset(&mut state, &context, 0) // [ns]
+            .expect("valid parameters must reset");
+        assert!(reset_outputs.dataOutMsg.is_none());
+        assert!(reset_outputs.dataOutMsgs.iter().all(Option::is_none));
+        assert_eq!(state.mode, TemplateMode::Running);
+        assert!(state.update_history.is_empty());
+        assert_eq!(state.last_event, "reset at 0 ns");
+
+        config
+            .update(
+                &mut state,
+                &context,
+                RustModuleTemplateInputs {
+                    dataInMsg: None,
+                    dataInMsgs: [None; 2],
+                },
+                1, // [ns]
+            )
+            .expect("update must succeed");
+        assert_eq!(state.update_history, vec![1.0]);
+        let expected_wrapped_angle = 4.0 - 2.0 * core::f64::consts::PI; // [rad]
+        assert_eq!(state.wrapped_angle, expected_wrapped_angle);
+        assert_eq!(state.last_event, "module 0 updated at 1 ns");
+    }
+
+    /// Demonstrate expected parameter failures without panicking.
+    #[test]
+    fn invalid_increment_returns_bsk_error() {
+        let runtime = BskModuleRuntime::for_testing();
+        let context = BskContext::for_testing(&runtime);
+        let mut config = RustModuleTemplateConfig {
+            dummy: 0.0,     // [-]
+            increment: 0.0, // [-]
+            sampleParameters: RustModuleTemplateParameters::default(),
+            sampleMatrix: [[0.0; 3]; 2], // [-]
+            dataInMsg: MsgReader::default(),
+            dataInMsgs: core::array::from_fn(|_| MsgReader::default()),
+            dataOutMsg: MsgWriter::default(),
+            dataOutMsgs: core::array::from_fn(|_| MsgWriter::default()),
+            legacyDummy: 0.0, // [-]
+            panicOnUpdate: false,
+            sampleFlags: [false; 3],
+            sampleFlagMatrix: [[false; 2]; 2],
+            sampleArray: [0.0; 64], // [-]
+        };
+        let mut state = RustModuleTemplateState::default();
+
+        let error = match config.reset(&mut state, &context, 0) {
+            Ok(_) => panic!("a zero increment must fail reset validation"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.message(),
+            "rustModuleTemplate.increment must be finite and strictly positive"
+        );
+    }
+}

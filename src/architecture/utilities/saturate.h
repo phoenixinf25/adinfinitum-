@@ -1,0 +1,45 @@
+/*
+ ISC License
+
+ Copyright (c) 2016, Autonomous Vehicle Systems Lab, University of Colorado at Boulder
+
+ Permission to use, copy, modify, and/or distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+ */
+
+#ifndef _Saturate_HH_
+#define _Saturate_HH_
+
+#include <Eigen/Dense>
+#include <stdint.h>
+
+/*! @brief This class is used to saturate an output variable
+ */
+class Saturate
+{
+
+  public:
+    Saturate();
+    Saturate(int64_t size); //!< class constructor
+    ~Saturate();
+    //! Set lower and upper bounds for each state.
+    void setBounds(const Eigen::Ref<const Eigen::MatrixX2d>& bounds);
+    //! Saturate the given states.
+    Eigen::VectorXd saturate(const Eigen::Ref<const Eigen::VectorXd>& unsaturatedStates);
+
+  private:
+    int64_t numStates;            //!< -- Number of states to generate noise for
+    Eigen::MatrixX2d stateBounds; //!< -- one row for each state. lower bounds in left column, upper in right column
+};
+
+#endif /* _saturate_HH_ */

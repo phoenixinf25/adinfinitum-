@@ -1,0 +1,530 @@
+#!/usr/bin/env python3
+"""Exercise representative Basilisk incremental-build dependencies.
+
+The test uses an existing Rust-enabled build and temporarily advances source
+file modification times. Original timestamps are restored even when a build
+or assertion fails.
+"""
+
+# ISC License
+#
+# Copyright (c) 2026, Autonomous Vehicle Systems Lab, University of Colorado at Boulder
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator, Optional
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+MTIME_MARGIN_SECONDS = 1.1  # [s]
+COMPILED_ARTIFACT_SUFFIXES = {".o", ".obj", ".rlib", ".rmeta"}
+COMPILE_OUTPUT_MARKERS = (
+    "Building C object",
+    "Building CXX object",
+    "Swig compile",
+    "Compiling ",
+)
+
+
+@dataclass(frozen=True)
+class WrapperTarget:
+    """Describe one representative SWIG wrapper target."""
+
+    name: str
+    wrapper: Path
+
+
+class IncrementalBuildError(RuntimeError):
+    """Report an incremental-build behavior regression."""
+
+
+def cmake_executable() -> str:
+    """Return the CMake executable used by the active Python environment."""
+
+    cmake = shutil.which("cmake")
+    if cmake is not None:
+        return cmake
+
+    environment_cmake = Path(sys.executable).with_name("cmake")
+    if environment_cmake.is_file():
+        return str(environment_cmake)
+
+    raise IncrementalBuildError("Could not locate the CMake executable.")
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments."""
+
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--source-dir",
+        type=Path,
+        default=REPOSITORY_ROOT / "src",
+        help="Basilisk CMake source directory",
+    )
+    parser.add_argument(
+        "--build-dir",
+        type=Path,
+        default=REPOSITORY_ROOT / "dist3",
+        help="Existing Rust-enabled CMake build directory",
+    )
+    parser.add_argument(
+        "--config",
+        help="Optional CMake multi-configuration build configuration",
+    )
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=min(os.cpu_count() or 1, 12),
+        help="Maximum number of parallel build jobs",
+    )
+    return parser.parse_args()
+
+
+def wrapper_targets(build_dir: Path) -> tuple[WrapperTarget, ...]:
+    """Return standard, generated-message, and Rust wrapper representatives."""
+
+    return (
+        WrapperTarget(
+            "mrpFeedback",
+            build_dir / "Basilisk/fswAlgorithms/mrpFeedbackPYTHON_wrap.cxx",
+        ),
+        WrapperTarget(
+            "AttRefMsgPayload",
+            build_dir / "Basilisk/architecture/messaging/AttRefMsgPayloadPYTHON_wrap.cxx",
+        ),
+        WrapperTarget(
+            "_bsk_python_mrpPDRust",
+            build_dir / "Basilisk/fswAlgorithms/mrpPDRust_rust_wrapPYTHON_wrap.cxx",
+        ),
+    )
+
+
+def run_build(
+    build_dir: Path,
+    targets: tuple[WrapperTarget, ...],
+    parallel: int,
+    configuration: Optional[str],
+) -> str:
+    """Build the representative targets and return their combined output."""
+
+    command = [
+        cmake_executable(),
+        "--build",
+        str(build_dir),
+        "--parallel",
+        str(parallel),
+        "--target",
+        *(target.name for target in targets),
+    ]
+    if configuration:
+        command.extend(("--config", configuration))
+
+    print("+", " ".join(command), flush=True)
+    result = subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    print(result.stdout, end="")
+    if result.returncode:
+        raise IncrementalBuildError(
+            f"CMake build failed with exit status {result.returncode}."
+        )
+    return result.stdout
+
+
+def configured_target_names(source_dir: Path, build_dir: Path) -> set[str]:
+    """List generated targets using the generator-independent CMake File API."""
+
+    # Visual Studio and Xcode do not provide the Make/Ninja ``help`` target.
+    api_dir = build_dir / ".cmake/api/v1"
+    client = "client-bsk-incremental-test"
+    query_dir = api_dir / "query" / client
+    query_dir.mkdir(parents=True, exist_ok=True)
+    (query_dir / "codemodel-v2").touch()
+    result = subprocess.run(
+        [cmake_executable(), "-S", str(source_dir), "-B", str(build_dir)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if result.returncode:
+        raise IncrementalBuildError(f"CMake target query failed:\n{result.stdout}")
+
+    reply_dir = api_dir / "reply"
+    indexes = sorted(reply_dir.glob("index-*.json"))
+    if not indexes:
+        raise IncrementalBuildError("CMake did not generate a File API reply index.")
+    try:
+        index = json.loads(indexes[-1].read_text(encoding="utf-8"))
+        reply = index["reply"][client]["codemodel-v2"]
+        codemodel = json.loads((reply_dir / reply["jsonFile"]).read_text(encoding="utf-8"))
+        return {
+            target["name"]
+            for configuration in codemodel["configurations"]
+            for target in configuration["targets"]
+        }
+    except (KeyError, ValueError, OSError) as error:
+        raise IncrementalBuildError(
+            f"Could not read the CMake target query reply: {error}"
+        ) from error
+
+
+def assert_package_configuration(source_dir: Path, build_dir: Path) -> None:
+    """Check header-only libraries and shared Custom.cmake discovery."""
+
+    target_names = configured_target_names(source_dir, build_dir)
+    unexpected_libraries = [
+        library
+        for library in ("communicationLib", "vizardLib")
+        if library in target_names
+    ]
+    if unexpected_libraries:
+        raise IncrementalBuildError(
+            "Header-only packages created binary library targets: "
+            + ", ".join(unexpected_libraries)
+        )
+    print("PASS: header-only packages did not create binary libraries.")
+
+    test_script = REPOSITORY_ROOT / ".github/scripts/test_cmake_package_configuration.cmake"
+    require_files((test_script,))
+    with tempfile.TemporaryDirectory(prefix="bsk-cmake-package-") as temporary_dir:
+        custom_file_command = [
+            cmake_executable(),
+            # CMake compares these values with its forward-slash glob results.
+            f"-DBSK_SOURCE_DIR={source_dir.as_posix()}",
+            f"-DTEST_ROOT={Path(temporary_dir).as_posix()}",
+            "-P",
+            str(test_script),
+        ]
+        custom_file_result = subprocess.run(
+            custom_file_command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    print(custom_file_result.stdout, end="")
+    if custom_file_result.returncode:
+        raise IncrementalBuildError(
+            "Custom.cmake discovery check failed with exit status "
+            f"{custom_file_result.returncode}."
+        )
+
+
+def require_files(paths: tuple[Path, ...]) -> None:
+    """Fail with a useful message when required inputs or outputs are absent."""
+
+    missing = [path for path in paths if not path.is_file()]
+    if missing:
+        formatted = "\n".join(f"  - {path}" for path in missing)
+        raise IncrementalBuildError(f"Required files are missing:\n{formatted}")
+
+
+def modification_times(targets: tuple[WrapperTarget, ...]) -> dict[str, int]:
+    """Return generated-wrapper modification times in nanoseconds."""
+
+    return {target.name: target.wrapper.stat().st_mtime_ns for target in targets}
+
+
+def wait_for_newer_clock(paths: tuple[Path, ...]) -> None:
+    """Wait until a new timestamp is distinguishable from all given paths."""
+
+    newest_seconds = max(path.stat().st_mtime_ns for path in paths) / 1_000_000_000  # [s]
+    delay_seconds = max(0.0, newest_seconds - time.time()) + MTIME_MARGIN_SECONDS  # [s]
+    time.sleep(delay_seconds)
+
+
+@contextmanager
+def temporarily_touch(path: Path, compared_paths: tuple[Path, ...]) -> Iterator[None]:
+    """Advance one file's timestamp and restore its original timestamps afterward."""
+
+    original_stat = path.stat()
+    wait_for_newer_clock(compared_paths)
+    path.touch()
+    try:
+        yield
+    finally:
+        os.utime(
+            path,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+
+
+def assert_wrappers_regenerated(
+    before: dict[str, int],
+    after: dict[str, int],
+) -> None:
+    """Require every representative wrapper to have a newer timestamp."""
+
+    stale = [name for name in before if after[name] <= before[name]]
+    if stale:
+        raise IncrementalBuildError(
+            "A real SWIG include did not regenerate these wrappers: "
+            + ", ".join(stale)
+        )
+
+
+def assert_wrappers_unchanged(
+    before: dict[str, int],
+    after: dict[str, int],
+) -> None:
+    """Require every representative wrapper timestamp to remain unchanged."""
+
+    changed = [name for name in before if after[name] != before[name]]
+    if changed:
+        raise IncrementalBuildError(
+            "An unrelated C++ source regenerated these wrappers: "
+            + ", ".join(changed)
+        )
+
+
+def compiled_artifacts(build_dir: Path) -> dict[Path, tuple[int, int]]:
+    """Return timestamps and sizes for compiled objects in the build tree."""
+
+    artifacts: dict[Path, tuple[int, int]] = {}
+    for path in build_dir.rglob("*"):
+        if path.is_file() and path.suffix.lower() in COMPILED_ARTIFACT_SUFFIXES:
+            stat = path.stat()
+            artifacts[path.relative_to(build_dir)] = (stat.st_mtime_ns, stat.st_size)
+    return artifacts
+
+
+def assert_no_compilation(
+    before: dict[Path, tuple[int, int]],
+    after: dict[Path, tuple[int, int]],
+    output: str,
+) -> None:
+    """Require an unchanged build to leave compiled artifacts untouched."""
+
+    changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+    compile_lines = [
+        line
+        for line in output.splitlines()
+        if any(marker in line for marker in COMPILE_OUTPUT_MARKERS)
+    ]
+    if changed or compile_lines:
+        details = []
+        if changed:
+            details.append(
+                "Compiled artifacts changed:\n"
+                + "\n".join(f"  - {path}" for path in changed)
+            )
+        if compile_lines:
+            details.append(
+                "Compilation commands were reported:\n"
+                + "\n".join(f"  {line}" for line in compile_lines)
+            )
+        raise IncrementalBuildError(
+            "The second unchanged build performed compilation.\n" + "\n".join(details)
+        )
+
+
+def assert_single_message_rebuild(
+    build_dir: Path,
+    targets: tuple[WrapperTarget, ...],
+    parallel: int,
+    configuration: Optional[str],
+) -> None:
+    """Require a message interface change to rebuild only its wrapper object."""
+
+    message_name = "AttRefMsgPayload"
+    interface = build_dir / "autoSource" / f"{message_name}.i"
+    messaging_dir = build_dir / "Basilisk/architecture/messaging"
+    libraries = [
+        path
+        for path in messaging_dir.glob("_messagingNative.*")
+        if path.suffix in {".so", ".pyd"}
+    ]
+    if len(libraries) != 1:
+        raise IncrementalBuildError(
+            f"Expected one combined messaging library, found {libraries}."
+        )
+    library = libraries[0]
+    require_files((interface, library))
+    before = compiled_artifacts(build_dir)
+    library_mtime = library.stat().st_mtime_ns
+    with temporarily_touch(interface, (library,)):
+        run_build(build_dir, targets, parallel, configuration)
+    after = compiled_artifacts(build_dir)
+    changed = [
+        path
+        for path in before.keys() | after.keys()
+        if before.get(path) != after.get(path)
+    ]
+    if len(changed) != 1 or changed[0].name not in {
+        f"{message_name}PYTHON_wrap.cxx.o",
+        f"{message_name}PYTHON_wrap.cxx.obj",
+        f"{message_name}PYTHON_wrap.obj",
+    }:
+        raise IncrementalBuildError(
+            "A single message interface change rebuilt unexpected objects: "
+            + ", ".join(str(path) for path in changed)
+        )
+    if library.stat().st_mtime_ns <= library_mtime:
+        raise IncrementalBuildError("The combined messaging library was not relinked.")
+    print("PASS: one message interface rebuilt only its object and relinked the library.")
+
+
+def assert_single_fsw_rebuild(
+    source_dir: Path,
+    build_dir: Path,
+    targets: tuple[WrapperTarget, ...],
+    parallel: int,
+    configuration: Optional[str],
+) -> None:
+    """Require one FSW edit to rebuild one object and relink the combined library."""
+
+    libraries = [
+        path
+        for path in (build_dir / "Basilisk/fswAlgorithms").glob("_fswCoreNative.*")
+        if path.suffix in {".so", ".pyd"}
+    ]
+    if not libraries:
+        return
+    if len(libraries) != 1:
+        raise IncrementalBuildError(f"Expected one combined FSW library, found {libraries}.")
+    library = libraries[0]
+    for suffix, object_names in (
+        ("c", {"mrpFeedback.c.o", "mrpFeedback.c.obj", "mrpFeedback.obj"}),
+        ("i", {"mrpFeedbackPYTHON_wrap.cxx.o", "mrpFeedbackPYTHON_wrap.cxx.obj",
+               "mrpFeedbackPYTHON_wrap.obj"}),
+    ):
+        source = source_dir / f"fswAlgorithms/attControl/mrpFeedback/mrpFeedback.{suffix}"
+        require_files((source, library))
+        before = compiled_artifacts(build_dir)
+        library_mtime = library.stat().st_mtime_ns
+        with temporarily_touch(source, (library,)):
+            run_build(build_dir, targets, parallel, configuration)
+        after = compiled_artifacts(build_dir)
+        changed = [path for path in before.keys() | after.keys()
+                   if before.get(path) != after.get(path)]
+        if len(changed) != 1 or changed[0].name not in object_names:
+            raise IncrementalBuildError(
+                f"A single FSW .{suffix} edit rebuilt unexpected objects: "
+                + ", ".join(str(path) for path in changed)
+            )
+        if library.stat().st_mtime_ns <= library_mtime:
+            raise IncrementalBuildError("The combined FSW library was not relinked.")
+        print(f"PASS: one FSW .{suffix} edit rebuilt only its object and relinked the library.")
+
+
+def assert_message_initializer_regenerated(
+    source_dir: Path,
+    build_dir: Path,
+    targets: tuple[WrapperTarget, ...],
+    parallel: int,
+    configuration: Optional[str],
+) -> None:
+    """Check that reconfiguration cannot mask a missing generated initializer."""
+
+    initializer = build_dir / "Basilisk/architecture/messaging/__init__.py"
+    initializer.unlink()
+    result = subprocess.run(
+        [cmake_executable(), "-S", str(source_dir), "-B", str(build_dir)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise IncrementalBuildError(f"CMake reconfiguration failed:\n{result.stdout}")
+    run_build(build_dir, targets, parallel, configuration)
+    if not initializer.read_text(encoding="utf-8").strip():
+        raise IncrementalBuildError(
+            "CMake left an empty messaging initializer after reconfiguration."
+        )
+    print("PASS: reconfiguring a cleaned package regenerated its messaging initializer.")
+
+
+def run_regression_test(args: argparse.Namespace) -> None:
+    """Run positive, negative, and no-change incremental-build checks."""
+
+    source_dir = args.source_dir.resolve()
+    build_dir = args.build_dir.resolve()
+    targets = wrapper_targets(build_dir)
+    wrappers = tuple(target.wrapper for target in targets)
+    shared_swig_include = source_dir / "architecture/utilities/bskException.swg"
+    unrelated_cpp = source_dir / "architecture/_GeneralModuleFiles/sys_model.cpp"
+
+    require_files((shared_swig_include, unrelated_cpp))
+    assert_package_configuration(source_dir, build_dir)
+    run_build(build_dir, targets, args.parallel, args.config)
+    require_files(wrappers)
+
+    before_include = modification_times(targets)
+    with temporarily_touch(shared_swig_include, wrappers):
+        run_build(build_dir, targets, args.parallel, args.config)
+    after_include = modification_times(targets)
+    assert_wrappers_regenerated(before_include, after_include)
+    print("PASS: a real %include regenerated all three wrapper types.")
+
+    before_cpp = modification_times(targets)
+    with temporarily_touch(unrelated_cpp, wrappers):
+        run_build(build_dir, targets, args.parallel, args.config)
+    after_cpp = modification_times(targets)
+    assert_wrappers_unchanged(before_cpp, after_cpp)
+    print("PASS: an unrelated .cpp did not regenerate any wrapper.")
+
+    assert_single_message_rebuild(build_dir, targets, args.parallel, args.config)
+    assert_single_fsw_rebuild(source_dir, build_dir, targets, args.parallel, args.config)
+    assert_message_initializer_regenerated(
+        source_dir, build_dir, targets, args.parallel, args.config
+    )
+
+    before_unchanged_wrappers = modification_times(targets)
+    before_unchanged = compiled_artifacts(build_dir)
+    unchanged_output = run_build(build_dir, targets, args.parallel, args.config)
+    after_unchanged = compiled_artifacts(build_dir)
+    after_unchanged_wrappers = modification_times(targets)
+    if after_unchanged_wrappers != before_unchanged_wrappers:
+        raise IncrementalBuildError(
+            "The second unchanged build regenerated one or more wrappers."
+        )
+    assert_no_compilation(before_unchanged, after_unchanged, unchanged_output)
+    print("PASS: a second unchanged build compiled nothing.")
+
+
+def main() -> int:
+    """Run the command-line integration test."""
+
+    try:
+        run_regression_test(parse_arguments())
+    except (IncrementalBuildError, OSError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

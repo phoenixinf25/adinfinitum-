@@ -1,0 +1,143 @@
+/*
+ ISC License
+
+ Copyright (c) 2016, Autonomous Vehicle Systems Lab, University of Colorado at Boulder
+
+ Permission to use, copy, modify, and/or distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+ */
+
+#ifndef _GaussMarkov_HH_
+#define _GaussMarkov_HH_
+
+#include "architecture/utilities/bskLogging.h"
+#include <Eigen/Dense>
+#include <random>
+#include <stdint.h>
+#include <string>
+#include <vector>
+
+/*! @brief This module is used to apply a second-order bounded Gauss-Markov random walk
+    on top of an upper level process.  The intent is that the caller will perform
+    the set methods (setUpperBounds, setNoiseMatrix, setPropMatrix) as often as
+    they need to, call computeNextState, and then call getCurrentState cyclically
+*/
+class GaussMarkov
+{
+
+  public:
+    GaussMarkov();
+    GaussMarkov(uint64_t size, uint64_t newSeed = 0x1badcad1); //!< class constructor
+    ~GaussMarkov();
+    void computeNextState();
+
+    /*! @brief Derive a seed for a secondary @c std::minstd_rand stream.
+
+        A fixed stream discriminator separates the seed values. The candidate
+        engine state is compared with the primary states obtained from both the
+        low 32 bits and the full 64 bits of @c baseSeed. If either state aliases,
+        the secondary engine advances until it differs from both primary states.
+        This includes the special case where @c std::minstd_rand normalizes
+        seeds zero and one to the same initial state.
+
+        The returned seed is normalized to 32 bits. @c std::minstd_rand::result_type
+        is @c std::uint_fast32_t, whose width is implementation defined, so an
+        unmasked seed would select a different secondary stream depending on the
+        standard library the simulation was built against.
+
+        @note Primary seeding is unchanged. A base seed above 32 bits may still
+        select different primary streams on platforms with different engine
+        result widths; the derived secondary stream remains distinct from both.
+
+        @param baseSeed Seed used by the primary random stream.
+        @return Seed for a distinct, repeatable secondary random stream.
+     */
+    static uint64_t deriveSecondarySeed(uint64_t baseSeed);
+
+    /*! @brief Restart the noise process with the supplied random seed.
+
+        The generator, cached distribution state, and propagated noise state are
+        reset so the same seed reproduces the complete output sequence.
+
+        @param newSeed The seed to use in the random number generator.
+     */
+    void setRNGSeed(uint64_t newSeed)
+    {
+        this->rGen.seed(static_cast<std::minstd_rand::result_type>(newSeed));
+        this->rNum.reset();
+        this->currentState.setZero();
+        this->RNGSeed = newSeed;
+    }
+
+    /*! Method returns the current random walk state from the model.
+
+        @return Reference to the vector of random walk values.
+    */
+    const Eigen::VectorXd& getCurrentState() const { return currentState; }
+
+    /*! Set the upper bounds on the random walk.
+
+        @param newBounds Bounds to put on the random walk states.
+    */
+    void setUpperBounds(const Eigen::Ref<const Eigen::VectorXd>& newBounds)
+    {
+        // For normal distribution, ~99.7% of values fall within ±3σ
+        // So bounds should be at least 3x the standard deviation
+        for (int i = 0; i < noiseMatrix.rows(); i++) {
+            // Only check for warning if bounds are positive (random walk enabled)
+            // and noise is non-zero (random walk active)
+            if (newBounds[i] > 0 && noiseMatrix(i, i) > 0 && newBounds[i] < 3.0 * noiseMatrix(i, i)) {
+                bskLogger.bskLog(BSK_WARNING,
+                                 "GaussMarkov bounds set tighter than 3σ - distribution will be truncated");
+            }
+        }
+        stateBounds = newBounds;
+    }
+
+    /*! Set the matrix used to define error sigmas.
+
+        @param noise New value for the noise matrix.
+    */
+    void setNoiseMatrix(const Eigen::Ref<const Eigen::MatrixXd>& noise) { noiseMatrix = noise; }
+
+    /*! Set the matrix used to propagate the state.
+
+        @param prop New value for the state propagation matrix.
+    */
+    void setPropMatrix(const Eigen::Ref<const Eigen::MatrixXd>& prop) { propMatrix = prop; }
+
+    Eigen::VectorXd stateBounds;  //!< -- Upper bounds to use for markov
+    Eigen::VectorXd currentState; //!< -- State of the markov model
+    Eigen::MatrixXd propMatrix;   //!< -- Matrix to propagate error state with
+    Eigen::MatrixXd
+        noiseMatrix; //!< -- Cholesky-decomposition or matrix square root of the covariance matrix to apply errors with
+    BSKLogger bskLogger; //!< -- BSK Logging
+
+  private:
+    void initializeRNG();
+    Eigen::VectorXd randomValues;          //!< -- Reusable standard-normal samples
+    Eigen::VectorXd stateNoise;            //!< -- Reusable process-noise workspace
+    Eigen::VectorXd propagatedState;       //!< -- Reusable propagation workspace
+    uint64_t RNGSeed;                      //!< -- Seed for random number generator
+    std::minstd_rand rGen;                 //!< -- Random number generator for model
+    std::normal_distribution<double> rNum; //!< -- Random number distribution for model
+    uint64_t numStates;                    //!< -- Number of states to generate noise for
+};
+
+//! Default bound for the Gauss-Markov model
+static constexpr double DEFAULT_BOUND = -1.0;
+
+//! Minimum state factor for the Gauss-Markov model
+static constexpr double MIN_STATE_FACTOR = 1E-10;
+
+#endif /* _GaussMarkov_HH_ */

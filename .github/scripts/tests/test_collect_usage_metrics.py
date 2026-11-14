@@ -1,0 +1,950 @@
+# ISC License
+#
+# Copyright (c) 2026, Autonomous Vehicle Systems Lab, University of Colorado at Boulder
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+"""Unit tests for the Basilisk usage-metrics collector."""
+
+import importlib.util
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import tempfile
+import unittest
+import xml.etree.ElementTree as ET
+from datetime import date, datetime, timezone
+from http.client import HTTPResponse, IncompleteRead, RemoteDisconnected
+from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.error import HTTPError, URLError
+
+
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "collect_usage_metrics.py"
+SPEC = importlib.util.spec_from_file_location("collect_usage_metrics", SCRIPT_PATH)
+METRICS = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(METRICS)
+
+
+def _github_metrics():
+    return {
+        "clones": [
+            {
+                "date": "2026-09-02",
+                "github_clones": 12,
+                "github_unique_cloners": 5,
+            },
+            {
+                "date": "2026-09-03",
+                "github_clones": 20,
+                "github_unique_cloners": 7,
+            },
+        ],
+        "clone_window_count": 32,
+        "clone_window_unique_cloners": 10,
+        "forks": 133,
+        "release_asset_downloads": 4,
+    }
+
+
+def _http_response(body, *, declared_length=None):
+    """Parse an in-memory HTTP response, optionally with a truncated body."""
+    length = len(body) if declared_length is None else declared_length
+    wire_data = f"HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n".encode("ascii") + body
+    socket = SimpleNamespace(makefile=lambda mode: BytesIO(wire_data))
+    response = HTTPResponse(socket)
+    response.begin()
+    return response
+
+
+class HttpRequestTest(unittest.TestCase):
+    def test_truncated_response_retries_and_can_recover(self):
+        """An incomplete body is discarded and a later complete response is used."""
+        responses = [_http_response(b"{", declared_length=2), _http_response(b"{}")]
+        with patch.object(METRICS, "urlopen", side_effect=responses) as request, \
+                patch.object(METRICS.time, "sleep") as sleep:
+            self.assertEqual(METRICS._request_text("https://example.invalid/metrics"), "{}")
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once_with(METRICS.RETRY_DELAY_SECONDS)
+
+    def test_truncated_responses_exhaust_retries_as_metrics_error(self):
+        """Real HTTP body truncation becomes a source error after all retries."""
+        responses = [_http_response(b"{", declared_length=2) for _ in range(METRICS.REQUEST_ATTEMPTS)]
+        with patch.object(METRICS, "urlopen", side_effect=responses) as request, \
+                patch.object(METRICS.time, "sleep") as sleep:
+            with self.assertRaises(METRICS.MetricsError) as raised:
+                METRICS._request_text("https://example.invalid/metrics")
+        self.assertIsInstance(raised.exception.__cause__, IncompleteRead)
+        self.assertEqual(request.call_count, METRICS.REQUEST_ATTEMPTS)
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            [METRICS.RETRY_DELAY_SECONDS*(attempt+1) for attempt in range(METRICS.REQUEST_ATTEMPTS-1)],
+        )
+
+    def test_response_read_errors_are_retried_and_normalized(self):
+        """Socket and HTTP read failures use the same bounded retry path."""
+        for error in (ConnectionResetError("reset"), TimeoutError("timed out"),
+                      OSError("read failed"), URLError("unreachable"), RemoteDisconnected("disconnected")):
+            with self.subTest(error=type(error).__name__):
+                responses = [_http_response(b"{}") for _ in range(METRICS.REQUEST_ATTEMPTS)]
+                with patch.object(METRICS, "urlopen", side_effect=responses) as request, \
+                        patch.object(HTTPResponse, "read", side_effect=error), \
+                        patch.object(METRICS.time, "sleep") as sleep:
+                    with self.assertRaises(METRICS.MetricsError) as raised:
+                        METRICS._request_text("https://example.invalid/metrics")
+                self.assertIs(raised.exception.__cause__, error)
+                self.assertEqual(request.call_count, METRICS.REQUEST_ATTEMPTS)
+                self.assertEqual(sleep.call_count, METRICS.REQUEST_ATTEMPTS-1)
+
+    def test_non_retryable_http_status_still_fails_immediately(self):
+        """HTTP status handling takes precedence over the generic I/O handler."""
+        error = HTTPError("https://example.invalid/metrics", 403, "Forbidden", {}, BytesIO())
+        self.addCleanup(error.close)
+        with patch.object(METRICS, "urlopen", side_effect=error) as request, \
+                patch.object(METRICS.time, "sleep") as sleep:
+            with self.assertRaisesRegex(METRICS.MetricsError, "HTTP 403"):
+                METRICS._request_text("https://example.invalid/metrics")
+        request.assert_called_once()
+        sleep.assert_not_called()
+
+
+class UsageMetricsTest(unittest.TestCase):
+    def test_merge_history_preserves_and_updates_overlapping_data(self):
+        """An API overlap updates known dates without discarding older counts."""
+        existing_rows = [
+            {
+                **METRICS._empty_history_row("2026-09-01"),
+                "github_clones": 8,
+                "github_unique_cloners": 4,
+            },
+            {
+                **METRICS._empty_history_row("2026-09-02"),
+                "github_clones": 1,
+                "github_unique_cloners": 1,
+            },
+        ]
+        pypi_rows = [
+            {
+                "date": "2026-09-02",
+                "pypi_downloads": 40,
+                "pypi_pip_downloads": 25,
+                "pypi_uv_downloads": 10,
+                "pypi_wheel_requests": 29,
+            },
+            {
+                "date": "2026-09-03",
+                "pypi_downloads": 50,
+                "pypi_pip_downloads": 30,
+                "pypi_uv_downloads": 15,
+                "pypi_wheel_requests": 36,
+            },
+        ]
+
+        rows = METRICS.merge_history(
+            existing_rows,
+            pypi_rows,
+            _github_metrics(),
+            "2026-09-03",
+        )
+
+        self.assertEqual(
+            [row["date"] for row in rows],
+            [
+                "2026-09-01",
+                "2026-09-02",
+                "2026-09-03",
+            ],
+        )
+        self.assertEqual(rows[0]["github_clones"], 8)
+        self.assertEqual(rows[1]["github_clones"], 12)
+        self.assertEqual(rows[2]["github_forks"], 133)
+        self.assertEqual(rows[2]["github_release_asset_downloads"], 4)
+        self.assertEqual(rows[1]["pypi_uv_downloads"], 10)
+        refreshed = METRICS.merge_history(rows, pypi_rows, None, "2026-09-03")
+        self.assertEqual(refreshed, rows)
+        self.assertEqual(METRICS._pip_uv_summary(refreshed)["pip_uv_downloads"], 80)
+        self.assertEqual(METRICS._wheel_request_summary(refreshed)["wheel_requests"], 65)
+
+    def test_summary_does_not_sum_daily_unique_cloners(self):
+        """The summary uses GitHub's window-level unique-cloner value."""
+        rows = METRICS.merge_history(
+            [],
+            [
+                {
+                    "date": "2026-09-03",
+                    "pypi_downloads": 50,
+                    "pypi_pip_downloads": 30,
+                }
+            ],
+            _github_metrics(),
+            "2026-09-03",
+        )
+
+        summary = METRICS.build_summary(
+            rows,
+            "bsk",
+            "AVSLab/basilisk",
+            _github_metrics(),
+            "2026-09-04T00:00:00+00:00",
+        )
+
+        self.assertEqual(summary["github"]["tracked_clones"], 32)
+        self.assertEqual(
+            summary["github"]["current_clone_window"]["unique_cloners"],
+            10,
+        )
+        self.assertNotIn("unique_cloners", summary["github"])
+
+    def test_csv_history_round_trip_preserves_missing_values(self):
+        """Blank cells remain missing when CSV history is reloaded."""
+        rows = [
+            {
+                **METRICS._empty_history_row("2026-09-03"),
+                "pypi_downloads": 50,
+                "pypi_pip_downloads": 30,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "metrics.csv"
+            METRICS.write_history(path, rows)
+            loaded_rows = METRICS.load_history(path)
+
+        self.assertEqual(loaded_rows, rows)
+
+    def test_generated_readme_explains_metric_limitations(self):
+        """The generated landing page distinguishes downloads from installs."""
+        rows = METRICS.merge_history(
+            [],
+            [
+                {
+                    "date": "2026-09-03",
+                    "pypi_downloads": 50,
+                    "pypi_pip_downloads": 30,
+                }
+            ],
+            _github_metrics(),
+            "2026-09-03",
+        )
+        summary = METRICS.build_summary(
+            rows,
+            "bsk",
+            "AVSLab/basilisk",
+            _github_metrics(),
+            "2026-09-04T00:00:00+00:00",
+        )
+
+        readme = METRICS.render_readme(summary)
+
+        self.assertIn("file-download events, not verified installations", readme)
+        self.assertIn("latest 14 days", readme)
+        self.assertIn("automatically generated source ZIP", readme)
+
+    def test_installer_total_uses_shared_observed_dates_and_retains_zero_days(self):
+        """The retained installer summary uses dates with both counts available."""
+        rows = METRICS.merge_history([], [
+            {"date": "2026-09-01", "pypi_downloads": 900, "pypi_pip_downloads": 800},
+            {"date": "2026-09-02", "pypi_downloads": 2000,
+             "pypi_pip_downloads": 1200, "pypi_uv_downloads": 34},
+            {"date": "2026-09-04", "pypi_downloads": 0,
+             "pypi_pip_downloads": 0, "pypi_uv_downloads": 0},
+        ], None, "2026-09-04")
+        summary = METRICS.build_summary(rows, "bsk", "AVSLab/basilisk", None, "test")
+        pypi = summary["pypi"]
+        self.assertEqual(pypi["pip_uv_downloads"], 1234)
+        self.assertEqual(pypi["uv_downloads"], 34)
+        self.assertEqual(pypi["pip_uv_coverage"], {
+            "start": "2026-09-02", "end": "2026-09-04", "observed_days": 2,
+        })
+        self.assertIn("Total PyPI downloads made by `pip` or `uv` | 1,234", METRICS.render_readme(summary))
+
+    def test_wheel_total_uses_observed_counts_including_zeros_and_preserves_gaps(self):
+        """The box sums wheel requests independently of distribution and installer counts."""
+        rows = METRICS.merge_history([], [
+            {"date": "2026-09-01", "pypi_downloads": 900, "pypi_pip_downloads": 800},
+            {"date": "2026-09-02", "pypi_downloads": 2000,
+             "pypi_pip_downloads": 1200, "pypi_uv_downloads": 34, "pypi_wheel_requests": 1500},
+            {"date": "2026-09-04", "pypi_downloads": 10,
+             "pypi_pip_downloads": 10, "pypi_uv_downloads": 0, "pypi_wheel_requests": 0},
+        ], None, "2026-09-04")
+        summary = METRICS.build_summary(rows, "bsk", "AVSLab/basilisk", None, "test")
+        self.assertEqual(summary["pypi"]["wheel_requests"], 1500)
+        self.assertEqual(summary["pypi"]["wheel_request_coverage"], {
+            "start": "2026-09-02", "end": "2026-09-04", "observed_days": 2,
+        })
+        svg = METRICS.render_usage_svg(rows, "test")
+        text = " ".join(ET.fromstring(svg).itertext())
+        self.assertIn("Recorded wheel download requests", text)
+        self.assertIn("1,500", text)
+        self.assertNotIn("Total pip + uv downloads", text)
+        self.assertIn("2026-09-02 through 2026-09-04", text)
+        self.assertIn("2 observed days; missing dates excluded", text)
+        self.assertIn("No complete seven-day window", text)
+        self.assertIn("repeat and partial requests included", text)
+        self.assertIn("Recorded wheel download requests | 1,500", METRICS.render_readme(summary))
+
+    def test_installer_total_distinguishes_unavailable_from_zero(self):
+        """Missing uv history must not masquerade as a zero or pip-only total."""
+        for uv_count, expected in ((None, None), (0, 0)):
+            with self.subTest(uv_count=uv_count):
+                rows = [{**METRICS._empty_history_row("2026-09-03"),
+                         "pypi_downloads": 0, "pypi_pip_downloads": 0,
+                         "pypi_uv_downloads": uv_count}]
+                summary = METRICS.build_summary(rows, "bsk", "AVSLab/basilisk", None, "test")
+                self.assertEqual(summary["pypi"]["pip_uv_downloads"], expected)
+
+    def test_wheel_total_distinguishes_unavailable_from_zero(self):
+        """A missing wheel count must not fall back to the broader installer counts."""
+        for wheel_count, expected in ((None, None), (0, 0)):
+            with self.subTest(wheel_count=wheel_count):
+                rows = [{**METRICS._empty_history_row("2026-09-03"),
+                         "pypi_downloads": 100, "pypi_pip_downloads": 20,
+                         "pypi_uv_downloads": 30, "pypi_wheel_requests": wheel_count}]
+                summary = METRICS.build_summary(rows, "bsk", "AVSLab/basilisk", None, "test")
+                self.assertEqual(summary["pypi"]["wheel_requests"], expected)
+                svg = ET.fromstring(METRICS.render_usage_svg(rows, "test"))
+                total = svg.find("{http://www.w3.org/2000/svg}text[@class='total-count']")
+                self.assertEqual(total.text, "Unavailable" if expected is None else "0")
+
+    def test_summary_is_json_serializable(self):
+        """The generated summary contains only stable JSON-compatible values."""
+        rows = METRICS.merge_history(
+            [],
+            [],
+            _github_metrics(),
+            "2026-09-03",
+        )
+        summary = METRICS.build_summary(
+            rows,
+            "bsk",
+            "AVSLab/basilisk",
+            _github_metrics(),
+            "2026-09-04T00:00:00+00:00",
+        )
+
+        self.assertEqual(json.loads(json.dumps(summary)), summary)
+
+    def test_usage_svg_contains_accessible_labeled_series(self):
+        """The generated chart identifies its content and plotted series."""
+        rows = [
+            {"date": f"2026-09-{day:02d}", "pypi_downloads": 50,
+             "pypi_pip_downloads": 30, "pypi_wheel_requests": 40,
+             "github_clones": 12, "github_unique_cloners": 5}
+            for day in range(1, 9)
+        ]
+
+        svg = METRICS.render_usage_svg(rows, "2026-09-04T00:00:00+00:00")
+
+        self.assertIn('role="img"', svg)
+        self.assertIn('<title id="chart-title">', svg)
+        self.assertIn("7-day trailing mean", svg)
+        self.assertIn('class="data-line wheel-requests"', svg)
+        self.assertIn("BSK wheels", svg)
+        self.assertIn("Daily BSK wheel download requests", svg)
+        self.assertNotIn('class="data-line pip-downloads"', svg)
+        self.assertNotIn("Non-mirror", svg)
+        self.assertIn('class="data-line github-clones"', svg)
+        ET.fromstring(svg)
+
+    def test_wheel_plot_uses_wheel_counts_without_distribution_fallback(self):
+        """The plotted values depend only on known wheel counts, including during migration."""
+        rows = [{"date": f"2026-09-{day:02d}", "pypi_downloads": 100,
+                 "pypi_pip_downloads": 90, "pypi_uv_downloads": 10, "pypi_wheel_requests": 15}
+                for day in range(1, 8)]
+        root = ET.fromstring(METRICS.render_usage_svg(rows, "test"))
+        wheel_path = root.find("{http://www.w3.org/2000/svg}path[@class='data-line wheel-requests']")
+        expected = METRICS._series_path(
+            [(date(2026, 9, 7).toordinal(), 15.0)],
+            date(2026, 9, 7).toordinal(), date(2026, 9, 7).toordinal(), 20.0,
+            (90.0, 250.0, 875.0, 225.0),
+        )
+        self.assertEqual(wheel_path.get("d"), expected)
+        for row in rows:
+            del row["pypi_wheel_requests"]
+        unknown = METRICS.render_usage_svg(rows, "test")
+        self.assertIn("No complete seven-day window", unknown)
+        self.assertNotIn('class="data-line wheel-requests"', unknown)
+
+    def test_rolling_average_counts_explicit_zero_days(self):
+        """Seven known days include zero counts in the denominator."""
+        rows = [
+            {"date": f"2026-09-{day:02d}", "pypi_downloads": 70 if day in (1, 7) else 0}
+            for day in range(1, 8)
+        ]
+        self.assertEqual(METRICS._rolling_series(rows, "pypi_downloads"), [
+            (date(2026, 9, 7).toordinal(), 20.0)
+        ])
+
+    def test_rolling_average_requires_a_complete_window(self):
+        """Both absent dates and explicitly unknown values break the window."""
+        complete = [
+            {"date": f"2026-09-{day:02d}", "pypi_downloads": day}
+            for day in range(1, 16)
+        ]
+        for missing in (True, False):
+            with self.subTest(absent=missing):
+                rows = [dict(row) for row in complete]
+                if missing:
+                    del rows[7]
+                else:
+                    rows[7]["pypi_downloads"] = None
+                self.assertEqual(METRICS._rolling_series(rows, "pypi_downloads"), [
+                    (date(2026, 9, 7).toordinal(), 4.0),
+                    (date(2026, 9, 15).toordinal(), 12.0),
+                ])
+
+    def test_sparse_history_remains_unknown_in_csv_and_chart(self):
+        """An absent source date is retained as blank and never averaged as zero."""
+        rows = METRICS.merge_history([], [
+            {"date": "2026-09-01", "pypi_downloads": 70, "pypi_pip_downloads": 40},
+            {"date": "2026-09-07", "pypi_downloads": 70, "pypi_pip_downloads": 40},
+        ], None, "2026-09-07")
+        self.assertEqual(len(rows), 7)
+        self.assertIsNone(rows[1]["pypi_downloads"])
+        self.assertEqual(METRICS._rolling_series(rows, "pypi_downloads"), [])
+        self.assertIn("No complete seven-day window", METRICS.render_usage_svg(rows, "test"))
+
+    def test_pypi_query_counts_known_wheels_from_all_clients_except_mirrors(self):
+        """Execute the SQL against clients, mirror names, and known and unknown files."""
+        class CountIf:
+            def __init__(self):
+                self.total = 0
+
+            def step(self, value):
+                self.total += bool(value)
+
+            def finalize(self):
+                return self.total
+
+        with sqlite3.connect(":memory:") as connection:
+            self.addCleanup(connection.close)
+            connection.row_factory = sqlite3.Row
+            connection.create_function("endsWith", 2, lambda value, suffix: value.endswith(suffix))
+            connection.create_aggregate("countIf", 1, CountIf)
+            connection.execute("CREATE TABLE pypi (date TEXT, project TEXT, installer TEXT, filename TEXT)")
+            connection.executemany("INSERT INTO pypi VALUES (?, ?, ?, ?)", [
+                ("2026-09-01", "bsk", "pip", filename)
+                for filename in ("bsk.whl", "bsk.tar.gz", "bsk.zip", "", "bsk.whl.metadata", "bsk.whl.asc")
+            ] + [
+                ("2026-09-01", "bsk", "uv", "bsk.whl"),
+                ("2026-09-01", "bsk", "UV", "bsk.tar.gz"),
+                ("2026-09-01", "bsk", "uv", "bsk.whl.metadata"),
+                ("2026-09-01", "another-package", "pip", "other.whl"),
+                ("2026-09-01", "bsk", "browser", "bsk.whl.metadata"),
+                ("2026-09-02", "bsk", "pip", "bsk.whl.metadata"),
+                ("2026-09-03", "bsk", "", ""),
+            ] + [
+                ("2026-09-01", "bsk", installer, "bsk.whl")
+                for installer in ("browser", "Poetry", "requests", "", "custom-client",
+                                  "bandersnatch", "z3c.pypimirror", "Artifactory", "devpi", "NEXUS")
+            ])
+
+            def query_source(url, *, data, headers):
+                # Translate only ClickHouse's expression-alias WITH syntax and
+                # wire formatting; execute its filtering/counting expressions.
+                prefix, select = data.decode().split("SELECT", 1)
+                expression = prefix.strip()[len("WITH "):].rsplit(" AS ", 1)[0]
+                sql = f"WITH annotated AS (SELECT *, {expression} AS distribution_or_unknown FROM pypi) SELECT {select}"
+                sql = sql.replace("FROM pypi.pypi", "FROM annotated")
+                sql = sql.replace("{package:String}", "?").replace("FORMAT JSONEachRow", "")
+                return "\n".join(json.dumps(dict(row)) for row in connection.execute(sql, ("bsk",)))
+
+            with patch.object(METRICS, "_request_text", side_effect=query_source):
+                rows = METRICS.fetch_pypi_history("bsk")
+
+        self.assertEqual(rows, [
+            {"date": "2026-09-01", "pypi_downloads": 11, "pypi_pip_downloads": 4,
+             "pypi_uv_downloads": 2, "pypi_wheel_requests": 7},
+            {"date": "2026-09-02", "pypi_downloads": 0, "pypi_pip_downloads": 0,
+             "pypi_uv_downloads": 0, "pypi_wheel_requests": 0},
+            {"date": "2026-09-03", "pypi_downloads": 1, "pypi_pip_downloads": 0,
+             "pypi_uv_downloads": 0, "pypi_wheel_requests": 0},
+        ])
+
+
+class SourceFailureTest(unittest.TestCase):
+    def setUp(self):
+        """Seed retained artifacts from a successful collection."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.output = Path(temporary.name)
+        self.today = "2026-09-04"
+        self.yesterday = "2026-09-03"
+        clock = patch.object(METRICS, "datetime")
+        self.addCleanup(clock.stop)
+        clock.start().now.return_value = datetime(2026, 9, 4, tzinfo=timezone.utc)
+        self.old_time = self.yesterday + "T00:00:00+00:00"
+        self.pypi_rows = [{"date": self.today, "pypi_downloads": 40,
+                           "pypi_pip_downloads": 20, "pypi_uv_downloads": 10, "pypi_wheel_requests": 25}]
+        self.github = _github_metrics()
+        self.github["clones"] = [{"date": self.today, "github_clones": 32, "github_unique_cloners": 10}]
+        self.old_rows = [{
+            **METRICS._empty_history_row(self.yesterday),
+            "pypi_downloads": 100, "pypi_pip_downloads": 50,
+            "pypi_uv_downloads": 30,
+            "pypi_wheel_requests": 60,
+            "github_clones": 99, "github_unique_cloners": 20,
+            "github_forks": 120, "github_release_asset_downloads": 2,
+        }]
+        METRICS.write_history(self.output / "metrics.csv", self.old_rows)
+        sources = {name: {"status": "ok", "last_attempt_at": self.old_time,
+                          "last_success_at": self.old_time, "error": None}
+                   for name in ("pypi", "github")}
+        self.previous = METRICS.build_summary(
+            self.old_rows, "bsk", "AVSLab/basilisk", self.github, self.old_time, sources,
+        )
+        (self.output / "summary.json").write_text(json.dumps(self.previous), encoding="utf-8")
+
+    def collect(self, *, pypi_error=None, github_error=None, output=None):
+        with patch.object(METRICS, "fetch_pypi_history", return_value=self.pypi_rows,
+                          side_effect=pypi_error) as pypi, \
+                patch.object(METRICS, "fetch_github_metrics", return_value=self.github,
+                             side_effect=github_error) as github:
+            summary = METRICS.collect_metrics(output or self.output, "bsk", "AVSLab/basilisk", "fixture")
+            pypi.assert_called_once()
+            github.assert_called_once()
+            return summary
+
+    def test_pypi_failure_still_retains_github_and_marks_pypi_stale(self):
+        """A PyPI outage publishes new clones without relabeling old PyPI observations."""
+        summary = self.collect(pypi_error=METRICS.MetricsError("ClickPy unavailable"))
+        self.assertEqual(summary["collection_status"], "partial")
+        self.assertEqual(summary["github"]["tracked_clones"], 131)
+        self.assertEqual(summary["pypi"]["downloads_excluding_known_mirrors"], 100)
+        self.assertEqual(summary["pypi"]["pip_uv_downloads"], 80)
+        self.assertEqual(summary["pypi"]["pip_uv_coverage"]["end"], self.yesterday)
+        self.assertEqual(summary["pypi"]["wheel_requests"], 60)
+        self.assertEqual(summary["pypi"]["wheel_request_coverage"]["end"], self.yesterday)
+        self.assertEqual(summary["sources"]["pypi"]["last_success_at"], self.old_time)
+        self.assertEqual(summary["sources"]["github"]["last_success_at"], summary["generated_at"])
+        self.assertIsNone(METRICS.load_history(self.output / "metrics.csv")[-1]["pypi_downloads"])
+        self.assertIn("ClickPy unavailable", (self.output / "README.md").read_text())
+        self.assertIn("pypi: error", (self.output / "usage.svg").read_text())
+
+    def test_github_failure_preserves_window_without_fabricating_a_snapshot(self):
+        """Old GitHub totals and unique-window data remain explicitly stale."""
+        summary = self.collect(github_error=METRICS.MetricsError("GitHub unavailable"))
+        self.assertEqual(summary["pypi"]["downloads_excluding_known_mirrors"], 140)
+        self.assertEqual(summary["github"]["forks"], 120)
+        self.assertEqual(summary["github"]["current_clone_window"], self.previous["github"]["current_clone_window"])
+        self.assertEqual(summary["sources"]["github"]["last_success_at"], self.old_time)
+        latest = METRICS.load_history(self.output / "metrics.csv")[-1]
+        self.assertIsNone(latest["github_forks"])
+        self.assertIsNone(latest["github_clones"])
+
+    def test_truncated_pypi_response_still_retains_github(self):
+        """A body-read failure saves new GitHub data and retains stale PyPI history."""
+        responses = [_http_response(b"{", declared_length=2) for _ in range(METRICS.REQUEST_ATTEMPTS)]
+        with patch.object(METRICS, "fetch_github_metrics", return_value=self.github) as github, \
+                patch.object(METRICS, "urlopen", side_effect=responses) as request, \
+                patch.object(METRICS.time, "sleep"):
+            summary = METRICS.collect_metrics(self.output, "bsk", "AVSLab/basilisk", "fixture")
+        github.assert_called_once()
+        self.assertEqual(request.call_count, METRICS.REQUEST_ATTEMPTS)
+        self.assertEqual(summary["collection_status"], "partial")
+        self.assertEqual(summary["sources"]["pypi"]["status"], "error")
+        self.assertEqual(summary["sources"]["pypi"]["last_success_at"], self.old_time)
+        self.assertEqual(summary["sources"]["github"]["status"], "ok")
+        rows = METRICS.load_history(self.output / "metrics.csv")
+        self.assertEqual(rows[0], self.old_rows[0])
+        self.assertEqual(rows[-1]["github_clones"], 32)
+        self.assertIsNone(rows[-1]["pypi_downloads"])
+        self.assertEqual(json.loads((self.output / "summary.json").read_text()), summary)
+        self.assertIn("IncompleteRead", (self.output / "README.md").read_text())
+        self.assertIn("pypi: error", (self.output / "usage.svg").read_text())
+
+    def test_truncated_github_response_still_collects_pypi(self):
+        """An earlier GitHub body-read failure does not skip PyPI collection."""
+        responses = [_http_response(b"{", declared_length=2) for _ in range(METRICS.REQUEST_ATTEMPTS)]
+        with patch.object(METRICS, "fetch_pypi_history", return_value=self.pypi_rows) as pypi, \
+                patch.object(METRICS, "urlopen", side_effect=responses) as request, \
+                patch.object(METRICS.time, "sleep"):
+            summary = METRICS.collect_metrics(self.output, "bsk", "AVSLab/basilisk", "fixture")
+        pypi.assert_called_once()
+        self.assertEqual(request.call_count, METRICS.REQUEST_ATTEMPTS)
+        self.assertEqual(summary["collection_status"], "partial")
+        self.assertEqual(summary["sources"]["github"]["status"], "error")
+        self.assertEqual(summary["sources"]["github"]["last_success_at"], self.old_time)
+        self.assertEqual(summary["sources"]["pypi"]["status"], "ok")
+        rows = METRICS.load_history(self.output / "metrics.csv")
+        self.assertEqual(rows[0], self.old_rows[0])
+        self.assertEqual(rows[-1]["pypi_downloads"], 40)
+        self.assertIsNone(rows[-1]["github_clones"])
+
+    def test_first_partial_collection_reports_unknown_counts_not_zero(self):
+        """An unavailable source without retained history is represented by nulls."""
+        for failed_source in ("pypi", "github"):
+            with self.subTest(source=failed_source):
+                output = self.output / failed_source
+                summary = self.collect(output=output, **{
+                    failed_source + "_error": METRICS.MetricsError("unavailable")
+                })
+                self.assertIsNone(summary["sources"][failed_source]["last_success_at"])
+                if failed_source == "pypi":
+                    self.assertIsNone(summary["pypi"]["downloads_excluding_known_mirrors"])
+                    self.assertIsNone(summary["pypi"]["uv_downloads"])
+                    self.assertIsNone(summary["pypi"]["pip_uv_downloads"])
+                    self.assertIsNone(summary["pypi"]["wheel_requests"])
+                else:
+                    self.assertIsNone(summary["github"]["forks"])
+                    self.assertIsNone(summary["github"]["current_clone_window"]["unique_cloners"])
+                self.assertIn("unavailable", (output / "README.md").read_text())
+                ET.fromstring((output / "usage.svg").read_text())
+
+    def test_both_failed_sources_leave_existing_artifacts_unchanged(self):
+        """A total outage attempts both sources and does not overwrite history."""
+        before = {path.name: path.read_bytes() for path in self.output.iterdir()}
+        with patch.object(METRICS, "fetch_pypi_history", side_effect=METRICS.MetricsError("offline")) as pypi, \
+                patch.object(METRICS, "fetch_github_metrics", side_effect=METRICS.MetricsError("offline")) as github:
+            with self.assertRaisesRegex(METRICS.MetricsError, "No sources collected"):
+                METRICS.collect_metrics(self.output, "bsk", "AVSLab/basilisk", "fixture")
+            pypi.assert_called_once()
+            github.assert_called_once()
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.output.iterdir()})
+
+    def test_missing_github_token_still_collects_pypi(self):
+        """A missing secret is reported per source without preventing PyPI collection."""
+        with patch.object(METRICS, "fetch_pypi_history", return_value=self.pypi_rows), \
+                patch.object(METRICS, "_request_json") as github_request:
+            summary = METRICS.collect_metrics(self.output, "bsk", "AVSLab/basilisk", "")
+        github_request.assert_not_called()
+        self.assertEqual(summary["sources"]["pypi"]["status"], "ok")
+        self.assertEqual(summary["sources"]["github"]["status"], "error")
+        self.assertIn("token", summary["sources"]["github"]["error"])
+
+    def test_recovery_refreshes_counts_and_clears_errors(self):
+        """A recovered source replaces overlapping counts and becomes current again."""
+        self.collect(pypi_error=METRICS.MetricsError("offline"))
+        self.pypi_rows.append({"date": self.yesterday, "pypi_downloads": 80, "pypi_pip_downloads": 30})
+        summary = self.collect()
+        self.assertEqual(summary["collection_status"], "complete")
+        self.assertEqual(summary["pypi"]["downloads_excluding_known_mirrors"], 120)
+        self.assertIsNone(summary["sources"]["pypi"]["error"])
+        rows = METRICS.load_history(self.output / "metrics.csv")
+        self.assertEqual(len(rows), 2)
+
+    def test_legacy_summary_retains_original_freshness_and_counting_policy(self):
+        """Schema-one history is not misrepresented as a successful filtered refresh."""
+        legacy = dict(self.previous, schema_version=1)
+        del legacy["sources"]
+        del legacy["pypi"]["counting_policy"]
+        (self.output / "summary.json").write_text(json.dumps(legacy), encoding="utf-8")
+        summary = self.collect(pypi_error=METRICS.MetricsError("offline"))
+        self.assertEqual(summary["sources"]["pypi"]["last_success_at"], self.old_time)
+        self.assertEqual(summary["pypi"]["counting_policy"], "legacy_unfiltered")
+
+    def test_legacy_csv_and_summary_upgrade_without_inventing_uv_history(self):
+        """Legacy totals remain unknown until a successful historical backfill."""
+        history = self.output / "metrics.csv"
+        history.write_text(
+            "date,pypi_downloads,pypi_pip_downloads,github_clones,github_unique_cloners,"
+            "github_forks,github_release_asset_downloads\n"
+            f"{self.yesterday},100,50,99,20,120,2\n", encoding="utf-8",
+        )
+        legacy = dict(self.previous, schema_version=2)
+        legacy["pypi"] = {
+            key: value for key, value in legacy["pypi"].items() if "uv" not in key and "wheel" not in key
+        }
+        (self.output / "summary.json").write_text(json.dumps(legacy), encoding="utf-8")
+        stale = self.collect(pypi_error=METRICS.MetricsError("offline"))
+        self.assertEqual(stale["schema_version"], 4)
+        self.assertEqual(stale["pypi"]["pip_downloads"], 50)
+        self.assertIsNone(stale["pypi"]["pip_uv_downloads"])
+        self.assertIsNone(stale["pypi"]["wheel_requests"])
+        self.assertIsNone(METRICS.load_history(history)[0]["pypi_uv_downloads"])
+        self.assertIn("Unavailable", (self.output / "usage.svg").read_text())
+        self.pypi_rows.append({"date": self.yesterday, "pypi_downloads": 100,
+                               "pypi_pip_downloads": 50, "pypi_uv_downloads": 30, "pypi_wheel_requests": 60})
+        refreshed = self.collect()
+        self.assertEqual(refreshed["pypi"]["pip_uv_downloads"], 110)
+        self.assertEqual(refreshed["pypi"]["pip_uv_coverage"]["observed_days"], 2)
+        self.assertEqual(METRICS.load_history(history)[0]["pypi_uv_downloads"], 30)
+        self.assertEqual(refreshed["pypi"]["wheel_requests"], 85)
+        self.assertEqual(self.collect()["pypi"], refreshed["pypi"])
+
+    def test_version_three_history_backfills_wheels_without_reusing_installer_total(self):
+        """An existing pip-plus-uv total is never presented as a wheel-request count."""
+        history = self.output / "metrics.csv"
+        history.write_text(
+            "date,pypi_downloads,pypi_pip_downloads,pypi_uv_downloads,github_clones,"
+            "github_unique_cloners,github_forks,github_release_asset_downloads\n"
+            f"{self.yesterday},100,50,30,99,20,120,2\n", encoding="utf-8",
+        )
+        legacy = dict(self.previous, schema_version=3)
+        legacy["pypi"] = {key: value for key, value in legacy["pypi"].items() if "wheel" not in key}
+        (self.output / "summary.json").write_text(json.dumps(legacy), encoding="utf-8")
+        stale = self.collect(pypi_error=METRICS.MetricsError("offline"))
+        self.assertEqual(stale["pypi"]["pip_uv_downloads"], 80)
+        self.assertIsNone(stale["pypi"]["wheel_requests"])
+        self.assertIsNone(METRICS.load_history(history)[0]["pypi_wheel_requests"])
+        self.assertIn("Unavailable", (self.output / "usage.svg").read_text())
+        # An upstream gap leaves older rows unknown while new dates are counted.
+        partial = self.collect()
+        self.assertEqual(partial["pypi"]["wheel_requests"], 25)
+        self.assertEqual(partial["pypi"]["wheel_request_coverage"]["start"], self.today)
+        self.pypi_rows.append({"date": self.yesterday, "pypi_downloads": 100,
+                               "pypi_pip_downloads": 50, "pypi_uv_downloads": 30, "pypi_wheel_requests": 60})
+        refreshed = self.collect()
+        self.assertEqual(refreshed["pypi"]["wheel_requests"], 85)
+        self.assertEqual(refreshed["pypi"]["wheel_request_coverage"]["observed_days"], 2)
+        self.assertEqual(self.collect()["pypi"], refreshed["pypi"])
+
+
+@unittest.skipUnless(os.name != "nt" and shutil.which("bash") and shutil.which("git"),
+                     "The metrics branch scripts run on POSIX GitHub runners")
+class MetricsBranchTest(unittest.TestCase):
+    def setUp(self):
+        """Create an isolated bare remote and a checkout with fetched references."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.remote = self.root / "remote.git"
+        self.checkout = self.root / "checkout"
+        # Hooks may inherit GIT_INDEX_FILE or GIT_DIR from the developer's
+        # checkout. Do not let the fixture commands touch that repository.
+        self.env = {
+            **{key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
+            "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
+        }
+        self.git("init", "--bare", str(self.remote), cwd=self.root)
+        self.seed_branch("develop", {"README.md": "fixture"})
+        self.git("clone", "--branch", "develop", str(self.remote), str(self.checkout), cwd=self.root)
+        self.output = self.root / "output"
+        self.script = SCRIPT_PATH.with_name("restore_usage_metrics.sh")
+
+    def git(self, *args, cwd=None, data=None):
+        return subprocess.run(["git", *args], cwd=cwd or self.remote, env=self.env,
+                              input=data, text=True, capture_output=True, check=True).stdout.strip()
+
+    def seed_branch(self, branch, files, parent=None):
+        """Create a remote fixture snapshot or append to its legacy history."""
+        entries = []
+        for name, content in sorted(files.items()):
+            blob = self.git("hash-object", "-w", "--stdin", data=content)
+            entries.append(f"100644 blob {blob}\t{name}\n")
+        tree = self.git("mktree", data="".join(entries))
+        parents = ["-p", parent] if parent else []
+        commit = self.git("commit-tree", tree, *parents, "-m", "Fixture")
+        self.git("update-ref", "refs/heads/" + branch, commit)
+        return commit
+
+    def restore(self, failed_command=None):
+        """Run the restore script, optionally injecting a Git command failure."""
+        return self.run_script(self.script, failed_command)
+
+    def publish(self, failed_command=None):
+        """Run the real publisher against the isolated local remote."""
+        return self.run_script(SCRIPT_PATH.with_name("publish_usage_metrics.sh"), failed_command)
+
+    def run_script(self, script, failed_command=None):
+        """Keep fault injection inside the fixture shell, not the user's Git."""
+        fault = ""
+        if failed_command:
+            fault = f'git() {{ if [[ "$1" == {failed_command} ]]; then return 128; fi; command git "$@"; }}\n'
+        return subprocess.run(["bash", "-c", fault + 'source "$1" "$2"', "restore",
+                               str(script), str(self.output)], cwd=self.checkout,
+                              env=self.env, text=True, capture_output=True)
+
+    def artifact_files(self, history="date,github_clones\n2026-09-01,12\n"):
+        """Provide complete artifacts with a historical observation to retain."""
+        return {"metrics.csv": history, "summary.json": '{"schema_version":2}\n',
+                "README.md": "Retained usage history\n", "usage.svg": "<svg/>\n", ".nojekyll": ""}
+
+    def write_artifacts(self, files):
+        """Simulate the collector's output without replacing restore metadata."""
+        self.output.mkdir(exist_ok=True)
+        for name, content in files.items():
+            (self.output / name).write_text(content, encoding="utf-8")
+
+    def assert_snapshot(self, files):
+        """Check that exactly one commit publishes all artifact bytes, and nothing else."""
+        revision = self.git("rev-parse", "refs/heads/usage-metrics")
+        self.assertEqual(self.git("rev-list", "--count", revision), "1")
+        self.assertEqual(self.git("show", "-s", "--format=%P", revision), "")
+        self.assertEqual(set(self.git("ls-tree", "--name-only", revision).splitlines()), set(files))
+        for name, content in files.items():
+            result = subprocess.run(["git", "show", f"{revision}:{name}"], cwd=self.remote,
+                                    env=self.env, capture_output=True, check=True)
+            self.assertEqual(result.stdout, content.encode("utf-8"))
+        return revision
+
+    def test_first_run_requires_a_successful_remote_lookup(self):
+        """A confirmed absent branch allows collection; a lookup failure does not."""
+        self.assertEqual(self.restore().returncode, 0)
+        self.assertFalse((self.output / "metrics.csv").exists())
+        self.assertNotEqual(self.restore("ls-remote").returncode, 0)
+
+    def test_existing_history_and_freshness_are_restored(self):
+        """The CSV and summary are restored byte for byte from the metrics branch."""
+        files = {"metrics.csv": "old history\n", "summary.json": '{"generated_at":"old"}\n'}
+        self.seed_branch("usage-metrics", files)
+        result = self.restore()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name, content in files.items():
+            self.assertEqual((self.output / name).read_text(), content)
+
+    def test_failed_fetch_stops_even_with_an_existing_remote_reference(self):
+        """The reviewed history-loss scenario fails before collection can proceed."""
+        commit = self.seed_branch("usage-metrics", {"metrics.csv": "old", "summary.json": "{}"})
+        self.git("fetch", "origin", cwd=self.checkout)
+        self.assertNotEqual(self.restore("fetch").returncode, 0)
+        self.assertFalse((self.output / "metrics.csv").exists())
+        self.assertEqual(self.git("rev-parse", "refs/heads/usage-metrics"), commit)
+
+    def test_missing_history_file_stops_restoration(self):
+        """An existing metrics branch must contain both durable artifacts."""
+        for missing in ("metrics.csv", "summary.json"):
+            with self.subTest(missing=missing):
+                self.seed_branch("usage-metrics", {
+                    name: "fixture" for name in ("metrics.csv", "summary.json") if name != missing
+                })
+                # Ensure subsequent fixtures do not cause a non-fast-forward
+                # fetch failure before the missing-file check is exercised.
+                self.git("fetch", "--force", "origin", cwd=self.checkout)
+                self.assertNotEqual(self.restore().returncode, 0)
+
+    def test_disappearing_remote_branch_does_not_discard_known_history(self):
+        """A branch removed after checkout cannot be mistaken for initial setup."""
+        self.seed_branch("usage-metrics", {"metrics.csv": "old", "summary.json": "{}"})
+        self.git("fetch", "origin", cwd=self.checkout)
+        self.git("update-ref", "-d", "refs/heads/usage-metrics")
+        self.assertNotEqual(self.restore().returncode, 0)
+
+    def test_repeated_publication_keeps_one_commit_and_all_observations(self):
+        """Creating/replacing snapshots retains old dates and leaves the checkout intact."""
+        source_revision = self.git("rev-parse", "HEAD", cwd=self.checkout)
+        (self.checkout / "README.md").write_text("Unrelated staged source change\n", encoding="utf-8")
+        self.git("add", "README.md", cwd=self.checkout)
+        source_index = self.git("write-tree", cwd=self.checkout)
+        history = "date,github_clones\n2026-09-01,12\n"
+        previous = None
+        for observation in ("2026-09-02,20\n", "2026-09-03,30\n"):
+            result = self.restore()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            if previous:
+                self.assertEqual((self.output / "metrics.csv").read_text(), history)
+            history += observation
+            files = self.artifact_files(history)
+            self.write_artifacts(files)
+            result = self.publish()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            revision = self.assert_snapshot(files)
+            self.assertNotEqual(revision, previous)
+            previous = revision
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.checkout), source_revision)
+        self.assertEqual(self.git("write-tree", cwd=self.checkout), source_index)
+        self.assertEqual(self.git("rev-parse", "refs/heads/develop"), source_revision)
+        self.assertEqual((self.checkout / "README.md").read_text(), "Unrelated staged source change\n")
+
+    def test_existing_daily_history_collapses_even_if_artifacts_are_unchanged(self):
+        """Migration drops old commit ancestry, not any current artifact content."""
+        files = self.artifact_files()
+        previous = None
+        for _ in range(3):
+            previous = self.seed_branch("usage-metrics", files, parent=previous)
+        self.assertEqual(self.git("rev-list", "--count", previous), "3")
+        self.assertEqual(self.restore().returncode, 0)
+        self.write_artifacts(files)
+        result = self.publish()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_snapshot(files)
+
+    def test_unchanged_single_snapshot_needs_no_push(self):
+        """Unchanged files already published without parents retain their revision."""
+        files = self.artifact_files()
+        previous = self.seed_branch("usage-metrics", files)
+        self.assertEqual(self.restore().returncode, 0)
+        self.write_artifacts(files)
+        result = self.publish("push")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.assert_snapshot(files), previous)
+
+    def test_restore_accepts_rewritten_snapshot(self):
+        """A fetched reference from an older run can be refreshed after replacement."""
+        self.seed_branch("usage-metrics", self.artifact_files())
+        self.assertEqual(self.restore().returncode, 0)
+        files = self.artifact_files("date,github_clones\n2026-09-01,15\n")
+        current = self.seed_branch("usage-metrics", files)
+        result = self.restore()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.output / "metrics.csv").read_text(), files["metrics.csv"])
+        self.assertEqual((self.output / ".source-commit").read_text().strip(), current)
+
+    def test_concurrent_publication_is_not_overwritten_even_after_fetch(self):
+        """The push lease uses the restored revision, not a newly fetched reference."""
+        self.seed_branch("usage-metrics", self.artifact_files())
+        self.assertEqual(self.restore().returncode, 0)
+        self.write_artifacts(self.artifact_files("date,github_clones\n2026-09-01,20\n"))
+        newer_files = self.artifact_files("date,github_clones\n2026-09-01,50\n")
+        newer = self.seed_branch("usage-metrics", newer_files)
+        self.git("fetch", "--force", "origin", cwd=self.checkout)
+        self.assertNotEqual(self.publish().returncode, 0)
+        self.assertEqual(self.assert_snapshot(newer_files), newer)
+
+    def test_first_publication_cannot_overwrite_a_concurrently_created_branch(self):
+        """An empty lease creates an absent branch but refuses an existing one."""
+        self.assertEqual(self.restore().returncode, 0)
+        self.write_artifacts(self.artifact_files("date,github_clones\n2026-09-01,20\n"))
+        newer_files = self.artifact_files()
+        newer = self.seed_branch("usage-metrics", newer_files)
+        self.assertNotEqual(self.publish().returncode, 0)
+        self.assertEqual(self.assert_snapshot(newer_files), newer)
+
+    def test_failed_push_keeps_the_published_snapshot(self):
+        """A publication failure never deletes the branch or its existing artifacts."""
+        files = self.artifact_files()
+        previous = self.seed_branch("usage-metrics", files)
+        self.assertEqual(self.restore().returncode, 0)
+        self.write_artifacts(self.artifact_files("date,github_clones\n2026-09-01,20\n"))
+        self.assertNotEqual(self.publish("push").returncode, 0)
+        self.assertEqual(self.assert_snapshot(files), previous)
+
+    def test_publication_cannot_recreate_a_concurrently_deleted_branch(self):
+        """A lease for an existing snapshot refuses to recreate a deleted branch."""
+        self.seed_branch("usage-metrics", self.artifact_files())
+        self.assertEqual(self.restore().returncode, 0)
+        self.write_artifacts(self.artifact_files("date,github_clones\n2026-09-01,20\n"))
+        self.git("update-ref", "-d", "refs/heads/usage-metrics")
+        self.assertNotEqual(self.publish().returncode, 0)
+        self.assertEqual(self.git("ls-remote", "--heads", str(self.remote), "usage-metrics"), "")
+
+    def test_missing_artifacts_leave_the_published_snapshot_intact(self):
+        """The publisher refuses incomplete output before pushing anything."""
+        files = self.artifact_files()
+        previous = self.seed_branch("usage-metrics", files)
+        self.assertEqual(self.restore().returncode, 0)
+        for missing in ("metrics.csv", "summary.json", "README.md", "usage.svg"):
+            with self.subTest(missing=missing):
+                self.write_artifacts(files)
+                (self.output / missing).unlink()
+                self.assertNotEqual(self.publish().returncode, 0)
+                self.assertEqual(self.assert_snapshot(files), previous)
+
+    def test_failed_restore_cannot_reuse_a_previous_publication_lease(self):
+        """A failed second restore invalidates the first restore's authorization."""
+        files = self.artifact_files()
+        previous = self.seed_branch("usage-metrics", files)
+        self.assertEqual(self.restore().returncode, 0)
+        self.write_artifacts(files)
+        self.assertNotEqual(self.restore("fetch").returncode, 0)
+        self.assertNotEqual(self.publish().returncode, 0)
+        self.assertEqual(self.assert_snapshot(files), previous)
+
+
+if __name__ == "__main__":
+    unittest.main()

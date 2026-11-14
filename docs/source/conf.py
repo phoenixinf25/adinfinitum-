@@ -1,0 +1,1107 @@
+# -*- coding: utf-8 -*-
+#
+# Configuration file for the Sphinx documentation builder.
+#
+# This file does only contain a selection of the most common options. For a
+# full list see the documentation:
+# http://www.sphinx-doc.org/en/master/config
+
+# -- Path setup --------------------------------------------------------------
+
+import datetime
+import shutil
+import tempfile
+# If extensions (or modules to document with autodoc) are in another directory,
+# add these directories to sys.path here. If the directory is relative to the
+# documentation root, use os.path.abspath to make it absolute, like shown here.
+#
+import os
+import sys
+sys.path.insert(0, os.path.abspath("_ext"))
+
+benchmarkSourceRoot = os.path.abspath("../../benchmarks")
+if os.path.isdir(benchmarkSourceRoot):
+    for dirPath, _, fileNames in os.walk(benchmarkSourceRoot):
+        if any(fileName.endswith(".py") for fileName in fileNames):
+            sys.path.insert(0, dirPath)
+
+import numpy as np
+from packaging.version import Version
+
+from docutils import nodes
+from docutils.parsers.rst import roles
+from generated_documentation import sync_generated_tree
+
+def beta_role(name, rawtext, text, lineno, inliner, options={}, content=[]):
+    label = nodes.inline(rawtext, "[BETA]", classes=['beta-label'])
+    return [label, nodes.Text(f" {text}")], []
+
+roles.register_local_role('beta', beta_role)
+
+def module_type_role(name, rawtext, text, lineno, inliner, options={}, content=[]):
+    module_type = text.strip()
+    css_class = module_type.lower().replace("+", "p")
+    node = nodes.inline(
+        rawtext,
+        module_type,
+        classes=['module-type-label', f'module-type-{css_class}']
+    )
+    return [node], []
+
+roles.register_local_role('module-type', module_type_role)
+
+#
+# create RST file showing supportData folder information
+#
+from collections import defaultdict
+from pathlib import Path, PurePosixPath
+
+
+def _normalize_single_page_docname(doc_path):
+    if not doc_path:
+        return ""
+
+    source_dir = Path(__file__).resolve().parent
+    doc_path = doc_path.strip()
+    candidate = Path(doc_path)
+    if candidate.suffix == "":
+        candidate = candidate.with_suffix(".rst")
+    if candidate.suffix != ".rst":
+        return ""
+
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.resolve(strict=False).relative_to(source_dir)
+        except ValueError:
+            return ""
+    elif candidate.parts and candidate.parts[0] == "source":
+        candidate = Path(*candidate.parts[1:])
+
+    return candidate.with_suffix("").as_posix().lstrip("./")
+
+
+def _single_page_docname_from_cli():
+    rst_args = [arg for arg in sys.argv[1:] if arg.endswith(".rst")]
+    if len(rst_args) != 1:
+        return ""
+    return _normalize_single_page_docname(rst_args[0])
+
+
+single_page_docname = _normalize_single_page_docname(
+    os.environ.get("BSK_DOCS_SINGLE_PAGE", "")
+) or _single_page_docname_from_cli()
+
+# A single-page preview may intentionally omit both snippet consumers.
+bsk_snippets_check_includes = not bool(single_page_docname)
+
+if single_page_docname:
+    print(f"Basilisk docs single-page mode: {single_page_docname}")
+
+
+def write_text_if_changed(output_file, contents):
+    output_path = Path(output_file)
+    if output_path.exists() and output_path.read_text(encoding="utf8") == contents:
+        return
+    output_path.write_text(contents, encoding="utf8")
+
+
+from Basilisk.utilities.supportDataTools.dataFetcher import POOCH
+def build_supportdata_index_rst(output_file: str):
+    groups = defaultdict(list)
+
+    for key in POOCH.registry.keys():
+        p = PurePosixPath(key)
+
+        # Expect: supportData/<topic>/<file>
+        if len(p.parts) < 3 or p.parts[0] != "supportData":
+            continue
+
+        topic = p.parts[1]
+        filename = p.name
+        groups[topic].append(filename)
+
+    # Sort topics and files
+    for topic in groups:
+        groups[topic].sort()
+
+    lines = []
+    lines.append(".. _supportDataList:")
+    lines.append("")
+    lines.append("Support Data Files")
+    lines.append("==================")
+    lines.append(".. note::\n")
+    lines.append("   Below is a list of all the data files that are packaged into Basilisk.")
+    lines.append("   They are organized into a range of topical folders where the folder name is the data category.")
+    lines.append("")
+
+    for topic in sorted(groups.keys()):
+        title = topic.replace("_", " ").title()
+
+        lines.append(title)
+        lines.append("-" * len(title))
+        lines.append("")
+
+        for fname in groups[topic]:
+            lines.append(f"- ``{fname}``")
+
+        lines.append("")
+
+    write_text_if_changed(output_file, "\n".join(lines))
+
+output_file = "supportData.rst"
+if not single_page_docname or single_page_docname == "supportData":
+    build_supportdata_index_rst(output_file)
+
+
+# -- Project information -----------------------------------------------------
+
+now = datetime.datetime.now()
+f = open('bskVersion.txt', 'r')
+bskVersion = f.read()
+f.close()
+
+project = u'Basilisk'
+copyright = str(now.year) + u', Autonomous Vehicle Systems (AVS) Laboratory'
+author = u'AVS Lab'
+release = bskVersion
+version = u'version ' + release
+
+from Basilisk.utilities.deprecated import BSKDeprecationWarning
+import warnings
+warnings.filterwarnings("ignore", category=BSKDeprecationWarning)
+
+# -- General configuration ---------------------------------------------------
+
+# If your documentation needs a minimal Sphinx version, state it here.
+#
+needs_sphinx = '7.0'
+
+# Add any Sphinx extension module names here, as strings. They can be
+# extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
+# ones.
+extensions = [
+    'sphinx.ext.autodoc',
+    'sphinx.ext.mathjax',
+    'sphinx.ext.viewcode',
+    'sphinx.ext.napoleon',
+    'sphinx.ext.graphviz',
+    "sphinx_rtd_theme",
+    'recommonmark',
+    'breathe',
+    'doxygen_cache',
+    'generated_documentation',
+    'rst_snippets',
+    'scenario_navigation',
+    'module_catalog',
+    'module_examples',
+    'sphinx_copybutton',
+    'bsk_module_io',
+    'sphinxcontrib.youtube'
+]
+
+graphviz_output_format = "svg"
+_dot_candidates = ["/opt/homebrew/bin/dot", "/usr/local/bin/dot"]
+graphviz_dot = shutil.which("dot") or next((p for p in _dot_candidates if os.path.exists(p)), "dot")
+
+# Use MathJax SVG output instead of CHTML to avoid browser/font-metric
+# rendering artifacts (e.g., vertically offset multi-character symbols).
+mathjax_path = "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"
+mathjax3_config = {
+    "svg": {"fontCache": "global"}
+}
+
+# filter out terminal prompt text from the code blocks
+copybutton_prompt_text = r"\(\.venv\) \$ |\$ "
+copybutton_prompt_is_regexp = True
+
+breathe_doxygen_config_options = {
+    'WARN_AS_ERROR': 'YES'
+    , 'WARN_IF_UNDOCUMENTED': 'YES'  # Ensure undocumented variables, functions, etc., raise warnings
+}
+breathe_doxygen_aliases = {}
+
+# Add any paths that contain templates here, relative to this directory.
+templates_path = ['_templates']
+
+# The suffix(es) of source filenames.
+# You can specify multiple suffix as a list of string:
+#
+#source_suffix = ['.rst', '.md', '.svg']
+source_suffix = {'.rst': 'restructuredtext'}
+
+# The master toctree document.
+master_doc = single_page_docname or 'index'
+
+if single_page_docname:
+    include_patterns = [single_page_docname + ".rst"]
+
+# The language for content autogenerated by Sphinx. Refer to documentation
+# for a list of supported languages.
+#
+# This is also used if you do content translation via gettext catalogs.
+# Usually you set "language" from the command line for these cases.
+language = "en"
+
+# List of patterns, relative to source directory, that match files and
+# directories to ignore when looking for source files.
+# This pattern also affects html_static_path and html_extra_path.
+exclude_patterns = [
+    'examples/BskSim/scenarios/index.rst',
+    'examples/BskSim/index.rst',
+    'examples/MultiSatBskSim/scenariosMultiSat/index.rst',
+    'examples/MultiSatBskSim/index.rst',
+    'examples/MultiSatBskSim/tleData/index.rst',
+    'examples/OpNavScenarios/scenariosOpNav/index.rst',
+    'examples/OpNavScenarios/scenariosOpNav/CNN_ImageGen/index.rst',
+    'examples/OpNavScenarios/scenariosOpNav/OpNavMC/index.rst',
+    'examples/OpNavScenarios/index.rst',
+    'examples/mujoco/index.rst',
+    'examples/dynamicsComparison/index.rst',
+    # Internal helpers and generated result artifacts are not documentation pages.
+    'examples/dynamicsComparison/_runtimeTable.rst',
+    'examples/dynamicsComparison/results/**',
+    # Snippets are included in their parent pages, not standalone documents.
+    'Support/bskReleaseNotesSnippets/*.rst',
+    'Support/bskReleaseNotesSnippets/*.md',
+    'Support/bskKnownIssuesSnippets/*.rst',
+    'Support/bskKnownIssuesSnippets/*.md',
+]
+
+# The name of the Pygments (syntax highlighting) style to use.
+pygments_style = None
+
+
+# -- Options for HTML output -------------------------------------------------
+
+# The theme to use for HTML and HTML Help pages.  See the documentation for
+# a list of builtin themes.
+#
+html_theme = "sphinx_rtd_theme"
+
+# Theme options are theme-specific and customize the look and feel of a theme
+# further.  For a list of options available for each theme, see the
+# documentation.
+html_theme_options = {
+    'logo_only': True,
+    'prev_next_buttons_location': 'bottom',
+    'style_external_links': True,
+    'vcs_pageview_mode': '',
+    'style_nav_header_background': '#CFB87C',
+    # Toc options
+    'collapse_navigation': True,
+    # Scroll the sidebar independently of the main document.
+    'sticky_navigation': False,
+    'navigation_depth': 4,
+    'includehidden': True,
+    'titles_only': True
+}
+
+html_css_files = [
+    'css/custom.css',
+]
+
+# Included by Sphinx in language_data.js, before its standard search engine.
+html_search_scorer = str(Path(__file__).resolve().parent / '_static/js/search-scorer.js')
+
+html_js_files = [
+    'js/sidebar.js',
+    'js/image-viewer.js',
+    'js/sticky-tables.js',
+]
+
+html_logo = "./_images/static/Basilisk-Logo.png"
+bsk_example_source_root = str(Path(__file__).resolve().parents[2] / "examples")
+html_context = {
+    'bsk_docs_prerelease': Version(release.strip()).is_prerelease,
+}
+
+# Add any paths that contain custom static files (such as style sheets) here,
+# relative to this directory. They are copied after the builtin static files,
+# so a file named "default.css" will overwrite the builtin "default.css".
+html_static_path = ['_static']
+
+# Custom sidebar templates, must be a dictionary that maps document names
+# to template names.
+
+
+
+#
+# The default sidebars (for documents that don't match any pattern) are
+# defined by theme itself.  Builtin themes are using these templates by
+# default: ``['localtoc.html', 'relations.html', 'sourcelink.html',
+# 'searchbox.html']``.
+#
+# html_sidebars = {}
+
+
+# -- Options for HTMLHelp output ---------------------------------------------
+
+# Output file base name for HTML help builder.
+htmlhelp_basename = 'Basiliskdoc'
+
+
+# -- Options for LaTeX output ------------------------------------------------
+
+latex_elements = {
+    # The paper size ('letterpaper' or 'a4paper').
+    #
+    # 'papersize': 'letterpaper',
+
+    # The font size ('10pt', '11pt' or '12pt').
+    #
+    # 'pointsize': '10pt',
+
+    # Additional stuff for the LaTeX preamble.
+    #
+    # 'preamble': '',
+
+    # Latex figure (float) alignment
+    #
+    # 'figure_align': 'htbp',
+}
+
+# Grouping the document tree into LaTeX files. List of tuples
+# (source start file, target name, title,
+#  author, documentclass [howto, manual, or own class]).
+latex_documents = [
+    (master_doc, 'Basilisk.tex', u'Basilisk Documentation',
+     u'AVS Lab', 'manual'),
+]
+
+
+# -- Options for manual page output ------------------------------------------
+
+# One entry per manual page. List of tuples
+# (source start file, name, description, authors, manual section).
+man_pages = [
+    (master_doc, 'basilisk', u'Basilisk Documentation',
+     [author], 1)
+]
+
+
+# -- Options for Texinfo output ----------------------------------------------
+
+# Grouping the document tree into Texinfo files. List of tuples
+# (source start file, target name, title, author,
+#  dir menu entry, description, category)
+texinfo_documents = [
+    (master_doc, 'Basilisk', u'Basilisk Documentation',
+     author, 'Basilisk', 'One line description of project.',
+     'Miscellaneous'),
+]
+
+
+# -- Options for Epub output -------------------------------------------------
+
+# Bibliographic Dublin Core info.
+epub_title = project
+
+# The unique identifier of the text. This can be a ISBN number
+# or the project homepage.
+#
+# epub_identifier = ''
+
+# A unique identification for the text.
+#
+# epub_uid = ''
+
+# A list of files that should not be packed into the epub file.
+epub_exclude_files = ['search.html']
+
+
+# -- Extension configuration -------------------------------------------------
+
+
+# breathe_projects = {"Basilisk": "../../src/*"}
+
+from glob import glob
+
+class fileCrawler():
+    def __init__(self, newFiles=False, rust_header_dir=None, documentation_root="./Documentation"):
+        self.newFiles = newFiles
+        self.breathe_projects_source = {}
+        self.counter = 0
+        self.rust_header_dir = Path(rust_header_dir).resolve() if rust_header_dir else None
+        self.documentation_root = Path(documentation_root)
+
+    def grabRelevantFiles(self,dir_path):
+        dirs_in_dir = glob(dir_path + '*/')
+        files_in_dir = glob(dir_path + "*.h")
+        files_in_dir.extend(glob(dir_path + "*.hpp"))
+        files_in_dir.extend(glob(dir_path + "*.c"))
+        files_in_dir.extend(glob(dir_path + "*.cpp"))
+        files_in_dir.extend(glob(dir_path + "*.py"))
+        files_in_dir.extend(glob(dir_path + "Cargo.toml"))
+
+
+        # Remove any directories that shouldn't be added directly to the website
+        removeList = []
+        for i in range(len(dirs_in_dir)):
+            if "_Documentation" in dirs_in_dir[i] or \
+                    "__pycache__" in dirs_in_dir[i] or \
+                    "_VizFiles" in dirs_in_dir[i] or \
+                    "Support" in dirs_in_dir[i] or \
+                    "cmake" in dirs_in_dir[i] or \
+                    "benchmarks" in dirs_in_dir[i] or \
+                    "topLevelModules" in dirs_in_dir[i] or \
+                    "outputFiles" in dirs_in_dir[i] or \
+                    "msgAutoSource" in dirs_in_dir[i] or \
+                    "alg_contain" in dirs_in_dir[i] or \
+                    "dataForExamples" in dirs_in_dir[i] or \
+                    "tests" in dirs_in_dir[i]:
+                removeList.extend([i])
+        for i in sorted(removeList, reverse=True):
+            del dirs_in_dir[i]
+
+        # Remove unnecessary source files (all files except .py, .c, .cpp, .h)
+        removeList = []
+        for i in range(len(files_in_dir)):
+            if "__init__" in files_in_dir[i] or \
+                    (files_in_dir[i].endswith(".py") and os.path.basename(files_in_dir[i]).startswith("_")) or \
+                    "conftest.py" in files_in_dir[i] or \
+                    "*.xml" in files_in_dir[i] or \
+                    "vizMessage.pb.cc" in files_in_dir[i] or \
+                    "vizMessage.pb.h" in files_in_dir[i] or \
+                    "vizMessage.proto" in files_in_dir[i] or \
+                    "EGM9615.h" in files_in_dir[i] or \
+                    "SunLineKF_test_utilities.py" in files_in_dir[i] or \
+                    "datashader_utilities.py" in files_in_dir[i] or \
+                    "reportconf.py" in files_in_dir[i]:
+                removeList.extend([i])
+        for i in sorted(removeList, reverse=True):
+            del files_in_dir[i]
+
+        paths_in_dir = []
+        paths_in_dir.extend(dirs_in_dir)
+        paths_in_dir.extend(files_in_dir)
+
+        return paths_in_dir
+
+    def seperateFilesAndDirs(self,paths):
+        files = []
+        dirs = []
+        for path in paths:
+            if os.path.isfile(path):
+                files.append(path)
+            elif os.path.isdir(path):
+                dirs.append(path)
+        return sorted(files), sorted(dirs)
+
+    def getModuleType(self, module_files):
+        file_extensions = {os.path.splitext(file_name)[1] for file_name in module_files}
+        if ".cpp" in file_extensions or ".hpp" in file_extensions:
+            return "C++"
+        return "C"
+
+    def _sourceRelativePath(self, path):
+        return os.path.relpath(os.path.abspath(path), os.path.abspath(officialSrc)).replace(os.sep, "/")
+
+    def _isSupportedBskModulePath(self, rel_path):
+        return rel_path.startswith(("fswAlgorithms/", "simulation/", "moduleTemplates/"))
+
+    def _hasMatchingModuleSource(self, src_path, module_name):
+        return any(
+            os.path.isfile(os.path.join(src_path, module_name + extension))
+            for extension in (".c", ".cpp", ".h", ".hpp")
+        )
+
+    def isBskCppOrCModule(self, src_path, module_name):
+        rel_path = self._sourceRelativePath(src_path)
+        path_parts = rel_path.split("/")
+
+        if not self._isSupportedBskModulePath(rel_path):
+            return False
+        if "_GeneralModuleFiles" in path_parts:
+            if not rel_path.startswith(("fswAlgorithms/", "simulation/")):
+                return False
+            return os.path.isfile(os.path.join(src_path, module_name + ".rst")) and \
+                self._hasMatchingModuleSource(src_path, module_name)
+
+        return os.path.isfile(os.path.join(src_path, module_name + ".i"))
+
+    def isBskPythonModule(self, py_file):
+        module_name = os.path.splitext(os.path.basename(py_file))[0]
+        parent_name = os.path.basename(os.path.dirname(py_file))
+        rel_path = self._sourceRelativePath(py_file)
+        path_parts = rel_path.split("/")
+
+        if not self._isSupportedBskModulePath(rel_path):
+            return False
+        if any(folder in path_parts for folder in ("_UnitTest", "_Documentation", "_GeneralModuleFiles", "__pycache__")):
+            return False
+        if module_name != parent_name:
+            return False
+
+        return not os.path.isfile(os.path.join(os.path.dirname(py_file), module_name + ".i"))
+
+    def isBskRustModule(self, manifest_file):
+        src_path = os.path.dirname(manifest_file)
+        module_name = os.path.basename(src_path)
+        rel_path = self._sourceRelativePath(src_path)
+
+        if not self._isSupportedBskModulePath(rel_path):
+            return False
+
+        return os.path.isfile(os.path.join(src_path, module_name + ".rst"))
+
+    def _isCargoSourceDirectory(self, directory, file_paths):
+        """Return whether *directory* is a Cargo crate's internal source folder."""
+        if os.path.basename(os.path.normpath(directory)) != "src":
+            return False
+
+        return any(
+            os.path.basename(file_path) == "Cargo.toml"
+            for file_path in file_paths
+        )
+
+    def _isCargoTargetDirectory(self, directory, file_paths):
+        """Return whether *directory* contains Cargo-generated build products."""
+        if os.path.basename(os.path.normpath(directory)) != "target":
+            return False
+
+        return any(
+            os.path.basename(file_path) == "Cargo.toml"
+            for file_path in file_paths
+        )
+
+    def _generated_rust_header(self, module_name):
+        """Return the generated module header when a Rust build produced it."""
+        if self.rust_header_dir is None:
+            return None
+
+        header_path = self.rust_header_dir / f"{module_name}.h"
+        return header_path if header_path.is_file() else None
+
+    def writeModuleTitle(self, title_text, module_type=None):
+        if module_type:
+            title = f":module-type:`{module_type}` {title_text}"
+        else:
+            title = title_text
+        return title + "\n" + "=" * len(title) + "\n\n"
+
+    @staticmethod
+    def _navigationSortKey(name):
+        """Sort underscore-prefixed entries first, then alphabetically by label."""
+        return (not name.startswith("_"), name.casefold(), name)
+
+    def _documentedModuleNames(self, src_path):
+        """Find documented modules, including several sharing one directory."""
+        source = Path(src_path)
+        if not self._isSupportedBskModulePath(self._sourceRelativePath(source)):
+            return []
+        names = []
+        for document in sorted(source.glob("*.rst")):
+            name = document.stem
+            if name.startswith("_"):
+                continue
+            is_module = (
+                self.isBskCppOrCModule(str(source), name)
+                and self._hasMatchingModuleSource(str(source), name)
+            ) or (
+                (source / (name + ".py")).is_file()
+                and self.isBskPythonModule(str(source / (name + ".py")))
+            ) or (
+                name == source.name
+                and (source / "Cargo.toml").is_file()
+                and self.isBskRustModule(str(source / "Cargo.toml"))
+            )
+            if is_module:
+                names.append(name)
+        return names
+
+    def _directModuleName(self, src_path):
+        """Return the sole module to use as a folder's navigation destination.
+
+        Supported areas are ``fswAlgorithms``, ``simulation``, and
+        ``moduleTemplates``. Custom folder introductions and multiple module
+        pages retain their grouping pages. Helpers move into the module sidebar.
+        """
+        source = Path(src_path)
+        relative_path = self._sourceRelativePath(source)
+        if not self._isSupportedBskModulePath(relative_path):
+            return None
+        if any((source / filename).is_file() for filename in ("_default.rst", "_doc.rst")):
+            return None
+
+        documents = list(source.glob("*.rst"))
+        if len(documents) != 1:
+            return None
+        # Some legacy folders differ from the module name, e.g. CSSEst/cssWlsEst.
+        name = documents[0].stem
+        return name if name in self._documentedModuleNames(source) else None
+
+    def _moduleAuxiliaryPages(self, src_path):
+        """List generated helper pages and folders without duplicating modules."""
+        paths = self.grabRelevantFiles(str(Path(src_path)) + os.sep)
+        files, directories = self.seperateFilesAndDirs(paths)
+        module_names = self._documentedModuleNames(src_path)
+        entries = []
+        for directory in directories:
+            if self._isCargoSourceDirectory(directory, files) or self._isCargoTargetDirectory(directory, files):
+                continue
+            name = Path(directory).name
+            target = self._directModuleName(directory) or "index"
+            entries.append(("Unit tests" if name == "_UnitTest" else name, f"{name}/{target}"))
+        helper_names = sorted({
+            Path(filename).stem for filename in files
+            if Path(filename).name != "Cargo.toml"
+            and Path(filename).stem not in module_names
+        })
+        entries.extend((name, name) for name in helper_names)
+        return sorted(entries, key=lambda entry: self._navigationSortKey(
+            entry[1].split("/")[0] if entry[1].startswith("_") else entry[0]
+        ))
+
+    def _withModuleAuxiliaryNavigation(self, contents, src_path, module_name):
+        """Place auxiliary links beside the summary, after introductory notes."""
+        module_names = self._documentedModuleNames(src_path)
+        if module_name not in module_names:
+            return contents
+        entries = self._moduleAuxiliaryPages(src_path)
+        if not entries:
+            return contents
+        navigation = (
+            ".. sidebar:: Auxiliary Files\n"
+            "   :class: bsk-module-auxiliary\n\n"
+        )
+        if len(module_names) > 1:
+            navigation += "   Shared by the modules in this folder.\n\n"
+        navigation += "".join(
+            f"   * :doc:`{label} <{target}>`\n" for label, target in entries
+        ) + "\n"
+        if self._directModuleName(src_path) == module_name:
+            navigation += ".. toctree::\n   :hidden:\n   :maxdepth: 1\n\n"
+            navigation += "".join(
+                f"   {label} <{target}>\n" for label, target in entries
+            ) + "\n"
+        # Otherwise the grouping page owns the shared auxiliary pages; links
+        # from module pages must not give them multiple toctree parents.
+        lines = contents.splitlines(keepends=True)
+        for index, line in enumerate(lines[:-1]):
+            underline = lines[index + 1].strip()
+            if (
+                line.rstrip().casefold() == "executive summary"
+                and len(underline) >= len(line.rstrip())
+                and len(set(underline)) == 1
+                and underline[0] in "=-~^\"'`:+*#_"
+            ):
+                # Insert before the heading so the floated box aligns with it.
+                # Any leading note remains full-width above this section.
+                return "".join(lines[:index]) + navigation + "".join(lines[index:])
+        # Modules without a summary heading retain a top-of-page sidebar.
+        return navigation + contents
+
+    def populateDocIndex(self, index_path, file_paths, dir_paths, src_path):
+
+        # get the folder name
+        name = os.path.basename(os.path.normpath(index_path))
+        lines = ""
+
+        direct_module = self._directModuleName(src_path)
+        if direct_module:
+            # Preserve old folder URLs and labels without a second toctree
+            # parent for the module or its tests.
+            lines = (
+                f":orphan:\n\n.. _Folder_{name}:\n\n"
+                f"{name}\n{'=' * len(name)}\n\n"
+                f":doc:`Module documentation <{direct_module}>`\n\n"
+            )
+            for label, target in self._moduleAuxiliaryPages(src_path):
+                lines += f":doc:`{label} <{target}>`\n\n"
+            if self.newFiles:
+                Path(index_path, "index.rst").write_text(lines, encoding="utf8")
+            return
+
+        # if a _default.rst file exists in a folder, then use it to generate the index.rst file
+        try:
+            pathToFolder, folderName = dir_paths[0].split(name)
+            docFileName = os.path.join(os.path.join(pathToFolder, name),  '_default.rst')
+            with open(docFileName, 'r') as docFile:
+                docContents = docFile.read()
+            lines += docContents + "\n\n"
+
+        except: # Auto-generate the index.rst file
+            # add page tag
+            normalizedIndexPath = index_path.replace(os.sep, "/").rstrip("/")
+            if name.startswith("_"):
+                pathToFolder = index_path.split("/"+name)[0]
+                lines += ".. " + name + pathToFolder.split("/")[-1] + ":\n\n"
+            elif name == 'utilities':
+                pathToFolder = index_path.split("/" + name)[0]
+                lines += ".. _Folder_" + name + pathToFolder.split("/")[-1] + ":\n\n"
+            else:
+                lines += ".. _Folder_" + name + ":\n\n"
+
+            # Title the page
+            lines += name + "\n" + "=" * len(name) + "\n\n"
+
+            # pull in folder _doc.rst file if it exists
+            try:
+                pathToFolder, folderName = dir_paths[0].split(name)
+                docFileName = os.path.join(os.path.join(pathToFolder, name), '_doc.rst')
+                if os.path.isfile(docFileName):
+                    with open(docFileName, 'r') as docFile:
+                        docContents = docFile.read()
+                    lines += docContents + "\n\n"
+            except:
+                pass
+
+            # Separate module pages from any supporting source-file pages.
+            is_documentation_root = self._sourceRelativePath(src_path) == "."
+            if is_documentation_root:
+                lines += (
+                    "Module Catalog\n--------------\n\n"
+                    "Find simulation modules, flight software algorithms, and module "
+                    "templates. Select a module name to open its documentation. "
+                    "Some modules require optional build features; see the module "
+                    "guide for requirements.\n\n"
+                    ".. bsk-module-catalog::\n\n"
+                )
+            calledNames = []
+            rust_module_name = None
+            for file_path in file_paths:
+                if os.path.basename(file_path) != "Cargo.toml":
+                    continue
+                source_path = os.path.dirname(file_path)
+                candidate_name = os.path.basename(source_path)
+                if self.isBskRustModule(file_path):
+                    rust_module_name = candidate_name
+                    calledNames.append(rust_module_name)
+                    break
+            for file_path in sorted(file_paths):
+                fileName = os.path.basename(os.path.normpath(file_path))
+                if fileName == "Cargo.toml":
+                    continue
+                fileName = fileName[:fileName.rfind('.')]
+                if not fileName in calledNames:
+                    calledNames.append(fileName)
+
+            module_names = self._documentedModuleNames(src_path)
+            for caption, entries in (
+                ("Modules", [name for name in calledNames if name in module_names]),
+                ("Files", [name for name in calledNames if name not in module_names]),
+            ):
+                if entries:
+                    lines += f"\n\n.. toctree::\n   :maxdepth: 1\n   :caption: {caption}:\n\n"
+                    for entry in sorted(entries, key=self._navigationSortKey):
+                        lines += f"   {entry} <{entry}>\n" if caption == "Modules" else f"   {entry}\n"
+
+            # Add a linking point to all local directories
+            directory_destinations = [
+                (directory, self._directModuleName(directory))
+                for directory in dir_paths
+            ]
+            directory_destinations.sort(key=lambda entry: self._navigationSortKey(
+                Path(entry[0]).name if Path(entry[0]).name.startswith("_")
+                else entry[1] or Path(entry[0]).name
+            ))
+            caption = "Modules" if directory_destinations and all(
+                module for _, module in directory_destinations
+            ) else "Directories"
+            lines += ".. toctree::\n   :maxdepth: 1\n"
+            if is_documentation_root:
+                # Retain the sidebar hierarchy without duplicating it below the catalog.
+                lines += "   :hidden:\n"
+            else:
+                lines += f"   :caption: {caption}:\n"
+            lines += "\n"
+            for dir_path, module in directory_destinations:
+                dirName = os.path.basename(os.path.normpath(dir_path))
+                if module:
+                    lines += f"   {module} <{dirName}/{module}>\n"
+                elif dirName == "_UnitTest" and module_names:
+                    lines += "   Unit tests <_UnitTest/index>\n"
+                else:
+                    lines += "   " + dirName + "/index\n"
+
+        if self.newFiles:
+            with open(os.path.join(index_path, "index.rst"), "w") as f:
+                f.write(lines)
+
+    def generateAutoDoc(self, path, files_paths):
+        if "/" in path:
+            name = os.path.basename(path)
+        sources = {}
+
+        # Sort the files by language
+        py_file_paths = sorted([s for s in files_paths if ".py" in s])
+        c_file_paths = sorted([s for s in files_paths if ".c" in s or ".cpp" in s or ".h" in s or ".hpp" in s])
+        rust_manifest_paths = sorted([s for s in files_paths if os.path.basename(s) == "Cargo.toml"])
+
+        # Create the .rst file for C-Modules
+
+        # Identify .h file and .c/.cpp that share the same basename
+        c_file_basenames = []
+        c_file_local_paths = []
+        for c_file_path in c_file_paths:
+            c_file_name = os.path.basename(c_file_path)
+            c_file_local_paths.append(c_file_name)
+            c_file_name = c_file_name[:c_file_name.rfind('.')]
+            c_file_basenames.append(c_file_name)
+
+        c_file_basenames = np.unique(c_file_basenames)
+
+        lines = ""
+        lines += ".. _" + name + ":\n\n"
+        lines += name + "\n" + "=" * len(name) + "\n\n"
+        lines += """.. toctree::\n   :maxdepth: 1\n   :caption: """ + name + ":\n\n"
+
+        if not c_file_paths == []:
+            # Identify where the module lives relative to source
+            src_path = os.path.dirname(c_file_path)
+            module_files = []
+            sources = {}
+            for c_file_basename in c_file_basenames:
+
+                module_files_temp = []
+                lines = ""
+                if c_file_basename == 'orbitalMotion' or c_file_basename == 'rigidBodyKinematics':
+                    pathToFolder = src_path.split("/" + c_file_basename)[0]
+                    lines += ".. _" + c_file_basename + pathToFolder.split("/")[-1] + ":\n\n"
+                else:
+                    lines += ".. _" + c_file_basename + ":\n\n"
+
+                # Link the path with the modules for Breathe
+                # make sure the list of files match the base name perfectly
+                # this avoids issues where one file name is contained in another
+                # file name
+                c_file_list_coarse = [s for s in c_file_local_paths if c_file_basename in s]
+                c_file_list = [file_name for file_name in c_file_list_coarse if file_name.rsplit(".", 1)[0] == c_file_basename]
+                module_files.extend(c_file_list)
+                module_files_temp.extend(c_file_list)
+                module_type = self.getModuleType(c_file_list)
+                is_bsk_module = self.isBskCppOrCModule(src_path, c_file_basename)
+
+                if is_bsk_module:
+                    lines += self.writeModuleTitle("Module: " + c_file_basename, module_type)
+                elif "architecture" in src_path or "utilities" in src_path:
+                    lines += self.writeModuleTitle(c_file_basename)
+                else:
+                    lines += self.writeModuleTitle(c_file_basename)
+
+                # pull in the module documentation file if it exists
+                docFileName = os.path.join(src_path, c_file_basename + '.rst')
+                if os.path.isfile(docFileName):
+                    with open(docFileName, 'r', encoding="utf8") as docFile:
+                        docContents = docFile.read()
+                    lines += self._withModuleAuxiliaryNavigation(
+                        docContents, src_path, c_file_basename
+                    ) + "\n\n"
+                    lines += "----\n\n"
+
+                # Separate the authored guide from generated API search content.
+                lines += ".. bsk-module-guide-end::\n\n"
+
+                # Populate the module's .rst
+                for module_file in module_files_temp:
+                    if ".h" in module_file:
+                        if name == "_GeneralModuleFiles":
+                            name += str(self.counter)
+                            self.counter += 1
+                        lines += (
+                            f".. doxygenfile:: {module_file}\n"
+                            f"   :project: {name}"
+                        )
+                        if module_file == "bsk_rust_module.h":
+                            lines += (
+                                "\n   :sections: innerclass briefdescription "
+                                "detaileddescription public-attrib define"
+                            )
+                        lines += "\n\n"
+                        # lines += """.. inheritance-diagram:: """ + module_file + """\n\n"""
+
+                if self.newFiles:
+                    with open(os.path.join(path,  c_file_basename + ".rst"), "w") as f:
+                        f.write(lines)
+
+            sources.update({name: (src_path, module_files)})
+
+        # Create the .rst file for the python module
+        if not py_file_paths == []:
+            # Add the module path to sys.path so sphinx can produce docs
+            sys.path.append(os.path.abspath(os.path.dirname(py_file_paths[0])))
+
+        for py_file in sorted(py_file_paths):
+            fileName = os.path.basename(py_file)
+            if fileName not in ["__init__.py"]:
+                fileName = fileName[:fileName.rfind('.')]
+                lines = ".. _"+ fileName + ":\n\n"
+                if self.isBskPythonModule(py_file):
+                    lines += self.writeModuleTitle("Module: " + fileName, "Python")
+                else:
+                    lines += self.writeModuleTitle(fileName)
+
+                docFileName = os.path.join(os.path.dirname(py_file), fileName + '.rst')
+                if os.path.isfile(docFileName):
+                    with open(docFileName, 'r', encoding="utf8") as docFile:
+                        docContents = docFile.read()
+                    lines += self._withModuleAuxiliaryNavigation(
+                        docContents, os.path.dirname(py_file), fileName
+                    ) + "\n\n"
+                    lines += "----\n\n"
+
+                lines += """.. toctree::\n   :maxdepth: 1\n   :caption: """ + "Files" + ":\n\n"
+                lines += ".. bsk-module-guide-end::\n\n"
+                lines += """.. automodule:: """ + fileName + """\n   :members:\n   :show-inheritance:\n\n"""
+                if self.newFiles:
+                    with open(path+"/"+fileName+".rst", "w") as f:
+                        f.write(lines)
+
+        # Create the .rst file for Rust modules
+        for manifest_file in rust_manifest_paths:
+            if not self.isBskRustModule(manifest_file):
+                continue
+
+            src_path = os.path.dirname(manifest_file)
+            module_name = os.path.basename(src_path)
+            lines = ".. _" + module_name + ":\n\n"
+            lines += self.writeModuleTitle("Module: " + module_name, "Rust")
+
+            doc_file_name = os.path.join(src_path, module_name + ".rst")
+            with open(doc_file_name, 'r', encoding="utf8") as doc_file:
+                lines += self._withModuleAuxiliaryNavigation(
+                    doc_file.read(), src_path, module_name
+                ) + "\n\n"
+
+            lines += ".. bsk-module-guide-end::\n\n"
+            generated_header = self._generated_rust_header(module_name)
+            if generated_header:
+                # Breathe caches AutoDoxygen projects by source directory.
+                # Use one project for all generated Rust headers because they
+                # share dist3/rust/include; separate projects can otherwise
+                # reuse another module's Doxygen input list.
+                project_name = "BasiliskRustModules"
+                lines += "Generated Module API\n--------------------\n\n"
+                lines += (
+                    "This C-compatible interface is generated from the Rust "
+                    "module source.\n\n"
+                )
+                lines += (
+                    ".. doxygenfile:: " + generated_header.name + "\n"
+                    "   :project: " + project_name + "\n"
+                    "   :sections: innerclass briefdescription "
+                    "detaileddescription public-attrib public-func\n\n"
+                )
+                generated_headers = sorted(
+                    path.name
+                    for path in generated_header.parent.glob("*.h")
+                    if path.is_file()
+                )
+                sources[project_name] = (
+                    str(generated_header.parent),
+                    generated_headers,
+                )
+
+            if self.newFiles:
+                with open(os.path.join(path, module_name + ".rst"), "w") as f:
+                    f.write(lines)
+
+        return sources
+
+
+
+
+    def run(self, srcDir):
+        # Find all files and directories in the src directory
+        paths_in_dir = self.grabRelevantFiles(srcDir)
+
+        # In the local folder, divvy up files and directories
+        file_paths, dir_paths = self.seperateFilesAndDirs(paths_in_dir)
+        dir_paths = [
+            directory
+            for directory in dir_paths
+            if not self._isCargoSourceDirectory(directory, file_paths)
+            and not self._isCargoTargetDirectory(directory, file_paths)
+        ]
+
+        index_path = os.path.relpath(srcDir, officialSrc)
+        if index_path == ".":
+            index_path = ""
+
+        documentation_path = self.documentation_root / index_path
+
+        documentation_path.mkdir(parents=True, exist_ok=True)
+        documentation_path_string = documentation_path.as_posix()
+
+        # Populate the index.rst file of the local directory
+        self.populateDocIndex(documentation_path_string, file_paths, dir_paths, srcDir)
+
+        # Generate the correct auto-doc function for C, C++, Python, and Rust modules
+        sources = self.generateAutoDoc(documentation_path_string, file_paths)
+
+        # Need to update the translation layer from doxygen to sphinx (breathe)
+        self.breathe_projects_source.update(sources)
+
+        # Recursively go through all directories in source, documenting what is available.
+        for dir_path in sorted(dir_paths):
+            self.run(dir_path)
+
+        if self.newFiles:
+            return self.breathe_projects_source
+        else:
+            return
+
+rebuild = not single_page_docname
+officialSrc = "../../src"
+
+default_rust_header_dir = (
+    Path(__file__).resolve().parents[2] / "dist3" / "rust" / "include"
+)
+rust_header_dir = os.environ.get("BSK_RUST_HEADER_DIR", default_rust_header_dir)
+import pickle
+
+if rebuild:
+    documentation_source_root = Path(__file__).resolve().parent
+    with tempfile.TemporaryDirectory(
+        prefix=".bsk-generated-docs-", dir=documentation_source_root
+    ) as staging_directory:
+        staging_root = Path(staging_directory)
+        staged_documentation_root = staging_root / "Documentation"
+        file_crawler = fileCrawler(
+            rebuild, rust_header_dir, staged_documentation_root
+        )
+
+        # Adjust the fileCrawler path to a local folder to build a subsystem.
+        doxygen_projects_source = file_crawler.run(officialSrc)
+        # doxygen_projects_source = file_crawler.run(officialSrc+"/fswAlgorithms")
+        # doxygen_projects_source = file_crawler.run(officialSrc+"/simulation/environment")
+        # doxygen_projects_source = file_crawler.run(officialSrc+"/moduleTemplates")
+        # doxygen_projects_source = file_crawler.run(officialSrc+"/simulation/vizard")
+        # doxygen_projects_source = file_crawler.run(officialSrc+"/architecture")
+        doxygen_projects_source = file_crawler.run("../../examples")
+        # doxygen_projects_source = file_crawler.run("../../supportData")
+        # doxygen_projects_source = file_crawler.run("../../externalTools")
+
+        for generated_root_name in ("Documentation", "examples"):
+            sync_counts = sync_generated_tree(
+                staging_root / generated_root_name,
+                documentation_source_root / generated_root_name,
+            )
+            print(
+                f"Generated {generated_root_name} documentation: "
+                f"{sync_counts['added']} added, "
+                f"{sync_counts['updated']} updated, "
+                f"{sync_counts['unchanged']} unchanged, "
+                f"{sync_counts['removed']} removed"
+            )
+
+    with open("breathe.data", 'wb') as f:
+        pickle.dump(doxygen_projects_source, f)
+else:
+    if os.path.exists('breathe.data'):
+        with open('breathe.data', 'rb') as f:
+            doxygen_projects_source = pickle.load(f)
+    else:
+        doxygen_projects_source = {}
+    #doxygen_projects_source = pickle.load('breathe.data')
+
+bsk_doxygen_projects_source = doxygen_projects_source
+# The cache extension generates XML after Sphinx applies configuration overrides.
+# Leave Breathe's automatic generation disabled to avoid a second Doxygen run.
+breathe_projects_source = {}
+    #fileCrawler.run("../../../Basilisk/src/")
+
+#TODO: Pickle the breathe_project_source and load that back in
+
+# Example of how to link C with Breathe
+# breathe_projects_source = {"BasiliskFSW": ("../../src/fswAlgorithms/attControl/mrpFeedback", ['mrpFeedback.c', 'mrpFeedback.h'])}

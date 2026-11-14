@@ -1,0 +1,62 @@
+name: docs
+description: Build Sphinx docs
+
+inputs:
+  html-dir: { required: false, default: "docs/build/html" }
+  is-canary:
+    description: If a canary build is being performed.
+    required: false
+    default: false
+
+runs:
+  using: composite
+  steps:
+    - name: Install doc requirements
+      shell: bash
+      run: |
+        brew install doxygen graphviz
+        if [[ "${{ inputs.is-canary }}" == 'true' ]]; then
+          pip install -r .github/workflows/requirements_doc.txt
+        else
+          pip install -r requirements_doc.txt
+        fi
+    - name: Install Node.js for documentation search tests
+      uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+        package-manager-cache: false
+    - name: Test documentation build integration
+      shell: bash
+      env:
+        MPLBACKEND: agg
+      working-directory: src
+      run: |
+        pip install pytest-error-for-skips
+        pytest tests/test_doxygen_cache.py \
+          tests/test_documentation_search.py \
+          tests/test_generated_documentation_sync.py \
+          tests/test_module_catalog.py \
+          tests/test_scenario_documentation_navigation.py \
+          tests/test_documentation_snippets.py \
+          -m docsIntegration --error-for-skips --timeout=300 -v
+    - name: Test documentation search ranking
+      shell: bash
+      working-directory: src
+      run: pytest ../docs/tests/test_search_scorer.py --error-for-skips --timeout=300 -v
+    - name: Generate doc artifacts
+      shell: bash
+      env:
+        MPLBACKEND: agg
+      working-directory: src
+      run: pytest -n auto -m "not ciSkip" -rs --dist=loadscope --durations=25 -v
+    - name: Generate dynamics-comparison figures
+      shell: bash
+      env:
+        MPLBACKEND: agg
+      working-directory: examples/dynamicsComparison
+      run: python runAllComparisons.py --documentation-figures
+    - name: Compile docs
+      shell: bash
+      run: |
+        make -C docs html SPHINXOPTS="-W"
+        echo "DOCS_HTML=${{ inputs.html-dir }}" >> "$GITHUB_ENV"

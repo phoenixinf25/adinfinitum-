@@ -1,0 +1,407 @@
+/*
+ ISC License
+
+ Copyright (c) 2023, Autonomous Vehicle Systems Lab, University of Colorado at Boulder
+
+ Permission to use, copy, modify, and/or distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+ */
+%module svIntegrators
+// BSK_SWIG_RUNTIME_DEPENDS: swig_common_model
+
+%include "architecture/utilities/bskException.swg"
+// Also translate std::exception (e.g. the std::runtime_error a
+// PrescribedGaussianNoiseGenerator throws when it runs out of prescribed samples or is
+// given a mismatched increment length) into a Python exception instead of letting it
+// escape and terminate the interpreter.
+%default_bsk_exception(catch (const std::exception& e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+});
+
+
+%{
+   #include <vector>
+   #include <memory>
+   #include "../_GeneralModuleFiles/stateVecIntegrator.h"
+   #include "../_GeneralModuleFiles/stateVecStochasticIntegrator.h"
+   #include "../_GeneralModuleFiles/stochasticNoiseGenerator.h"
+   #include "../_GeneralModuleFiles/stochasticRKIntegratorBase.h"
+   #include "../_GeneralModuleFiles/svIntegratorRungeKutta.h"
+   #include "../_GeneralModuleFiles/svIntegratorRK4.h"
+   #include "../_GeneralModuleFiles/svIntegratorStrongStochasticRungeKuttaSRI.h"
+   #include "../_GeneralModuleFiles/svIntegratorStrongStochasticRungeKuttaSRA.h"
+   #include "../_GeneralModuleFiles/svIntegratorWeakSIESME.h"
+   #include "svIntegratorEuler.h"
+   #include "svIntegratorRK2.h"
+   #include "svIntegratorRKF45.h"
+   #include "svIntegratorRKF78.h"
+   #include "svStochasticIntegratorMayurama.h"
+   #include "svStochasticIntegratorW2Ito.h"
+   #include "svStochasticIntegratorW2Ito1.h"
+   #include "svStochasticIntegratorW2Ito2.h"
+   #include "svStochasticIntegratorSRIW1.h"
+   #include "svStochasticIntegratorSOSRI.h"
+   #include "svStochasticIntegratorSRA1.h"
+   #include "svStochasticIntegratorSOSRA.h"
+   #include "svStochasticIntegratorEulerHeun.h"
+   #include "svStochasticIntegratorRKMil.h"
+   #include "svStochasticIntegratorSIESME.h"
+   #include "svStochasticIntegratorRDI1WM.h"
+   #include "svStochasticIntegratorDRI1.h"
+   #include "svStochasticIntegratorRS.h"
+   #include "architecture/_GeneralModuleFiles/sys_model.h"
+   #include "../_GeneralModuleFiles/dynamicObject.h"
+%}
+
+%pythoncode %{
+from Basilisk.architecture.swig_common_model import *
+
+# The following maps store the RK base classes w.r.t their stage number
+_rk_base_classes = {}
+_rk_adaptive_base_classes = {}
+%}
+
+%include <std_vector.i>
+%include <std_string.i>
+// Match swig_common_model.i's template arguments, including the inner allocator,
+// so SWIG uses the same type descriptors for DoubleVector and MultiArray.
+%template() std::vector<double, std::allocator<double>>;
+%template() std::vector<std::vector<double, std::allocator<double>>>;
+
+%typemap(out) std::optional<double> {
+    if ($1.has_value()) {
+        $result = PyFloat_FromDouble($1.value());
+    } else {
+        $result = Py_None;
+        Py_INCREF($result);
+    }
+}
+
+%include "swig_eigen.i"
+
+%include "sys_model.i"
+%include "../_GeneralModuleFiles/dynamicObjectImport.swg"
+%ignore StochasticObjectDescriptor;
+%ignore StochasticStateDescriptor;
+%ignore StochasticNoiseBinding;
+%ignore StochasticNoiseSlot;
+// sys_model.i resets %exception to the BasiliskError-only default. Integrator
+// lifecycle checks throw std::runtime_error, so restore translation before
+// the derived integrators are wrapped.
+%default_bsk_exception(catch (const std::exception& e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+});
+%include "../_GeneralModuleFiles/stateVecStochasticIntegrator.h"
+
+// Flat-state descriptors are internal implementation details.
+%ignore svIntegratorRungeKutta::FlatObjectDescriptor;
+%ignore svIntegratorRungeKutta::FlatStateDescriptor;
+%ignore svIntegratorRungeKutta::FlatUpdateRun;
+%ignore svIntegratorAdaptiveRungeKutta::ToleranceSpan;
+%ignore svIntegratorAdaptiveRungeKutta::ToleranceOverride;
+%ignore svStochasticIntegratorW2Ito::FlatStateDescriptor;
+%ignore svStochasticIntegratorDRI1::FlatStateDescriptor;
+
+// The GaussianNoiseGenerator hierarchy is jointly owned by Python and C++: a
+// generator can be created in Python and handed to an integrator via
+// setNoiseGenerator(). Wrapping it as a shared_ptr keeps the C++ object alive even
+// after the Python reference is dropped. Declarations must precede the %include of
+// stochasticNoiseGenerator.h, base before derived.
+%include <std_shared_ptr.i>
+%shared_ptr(GaussianNoiseGenerator)
+%shared_ptr(RandomGaussianNoiseGenerator)
+%shared_ptr(PrescribedGaussianNoiseGenerator)
+%ignore GaussianNoiseGenerator::generateInto;
+%ignore GaussianNoiseGenerator::generateWithAuxiliaryInto;
+%ignore GaussianNoiseGenerator::generateWienerInto;
+// Re-assert the exception handler here (earlier %include'd interfaces reset %exception to
+// the BasiliskError-only default): PrescribedGaussianNoiseGenerator::generate throws a
+// std::runtime_error when out of prescribed samples or given a mismatched increment
+// length, and without this catch that exception would escape and terminate the interpreter.
+%default_bsk_exception(catch (const std::exception& e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+});
+%include "../_GeneralModuleFiles/stochasticNoiseGenerator.h"
+
+// Shared base for the stochastic Runge-Kutta integrators (must precede the concrete
+// integrator %includes below, which derive from it).
+%include "../_GeneralModuleFiles/stochasticRKIntegratorBase.h"
+
+%include "../_GeneralModuleFiles/svIntegratorRungeKutta.h"
+%include "../_GeneralModuleFiles/svIntegratorAdaptiveRungeKutta.h"
+%include "../_GeneralModuleFiles/svIntegratorStrongStochasticRungeKuttaSRI.h"
+%include "../_GeneralModuleFiles/svIntegratorStrongStochasticRungeKuttaSRA.h"
+%include "../_GeneralModuleFiles/svIntegratorWeakSIESME.h"
+
+// We add a constructor for svIntegratorRungeKutta and svIntegratorAdaptiveRungeKutta
+// These are useful for us to build these classes on the Python side without having
+// to access the RKCoefficients or RKAdaptiveCoefficients structs.
+%extend svIntegratorRungeKutta {
+   svIntegratorRungeKutta(
+      DynamicObject* dynIn,
+      std::vector<std::vector<double>> aMatrix,
+      std::vector<double> bArray,
+      std::vector<double> cArray
+   )
+   {
+      if (aMatrix.size() != numberStages
+          || bArray.size() != numberStages
+          || cArray.size() != numberStages) {
+          throw std::invalid_argument(
+              "Runge-Kutta tableau dimensions must exactly match the stage count.");
+      }
+      for (const auto& row : aMatrix) {
+          if (row.size() != numberStages) {
+              throw std::invalid_argument(
+                  "Runge-Kutta tableau rows must exactly match the stage count.");
+          }
+      }
+      RKCoefficients<numberStages> coefficients;
+      for (size_t i = 0; i < numberStages; i++)
+      {
+          std::copy_n(aMatrix.at(i).begin(), numberStages, coefficients.aMatrix.at(i).begin());
+      }
+      std::copy_n(bArray.begin(), numberStages, coefficients.bArray.begin());
+      std::copy_n(cArray.begin(), numberStages, coefficients.cArray.begin());
+
+      return new svIntegratorRungeKutta<numberStages>(dynIn, coefficients);
+  }
+}
+
+%extend svIntegratorAdaptiveRungeKutta {
+   svIntegratorAdaptiveRungeKutta(
+      DynamicObject* dynIn,
+      std::vector<std::vector<double>> aMatrix,
+      std::vector<double> bArray,
+      std::vector<double> bStarArray,
+      std::vector<double> cArray,
+      double largestOrder
+   )
+   {
+      if (aMatrix.size() != numberStages
+          || bArray.size() != numberStages
+          || bStarArray.size() != numberStages
+          || cArray.size() != numberStages) {
+          throw std::invalid_argument(
+              "Adaptive Runge-Kutta tableau dimensions must exactly match the stage count.");
+      }
+      for (const auto& row : aMatrix) {
+          if (row.size() != numberStages) {
+              throw std::invalid_argument(
+                  "Adaptive Runge-Kutta tableau rows must exactly match the stage count.");
+          }
+      }
+      RKAdaptiveCoefficients<numberStages> coefficients;
+      for (size_t i = 0; i < numberStages; i++)
+      {
+          std::copy_n(aMatrix.at(i).begin(), numberStages, coefficients.aMatrix.at(i).begin());
+      }
+      std::copy_n(bArray.begin(), numberStages, coefficients.bArray.begin());
+      std::copy_n(bStarArray.begin(), numberStages, coefficients.bStarArray.begin());
+      std::copy_n(cArray.begin(), numberStages, coefficients.cArray.begin());
+
+      return new svIntegratorAdaptiveRungeKutta<numberStages>(dynIn, coefficients, largestOrder);
+  }
+}
+
+%define TEMPLATE_HELPER(stageNumber)
+%template(svIntegratorRungeKutta ## stageNumber) svIntegratorRungeKutta< ## stageNumber>;
+%template(svIntegratorAdaptiveRungeKutta ## stageNumber) svIntegratorAdaptiveRungeKutta< ## stageNumber>;
+
+%pythoncode %{
+_rk_base_classes[## stageNumber] = svIntegratorRungeKutta ## stageNumber
+_rk_adaptive_base_classes[## stageNumber] = svIntegratorAdaptiveRungeKutta ## stageNumber
+%}
+%enddef
+
+TEMPLATE_HELPER(1)
+TEMPLATE_HELPER(2)
+TEMPLATE_HELPER(3)
+TEMPLATE_HELPER(4)
+TEMPLATE_HELPER(6)
+TEMPLATE_HELPER(7)
+TEMPLATE_HELPER(9)
+TEMPLATE_HELPER(13)
+
+// Base-class template instantiations for the strong SRK integrators. The concrete
+// SRI/SRA integrators below derive from these, so the templates must be instantiated
+// with the appropriate stage counts first (SRI: 4 stages; SRA: 2 and 3 stages).
+%template(svIntegratorStrongStochasticRungeKuttaSRI4) svIntegratorStrongStochasticRungeKuttaSRI<4>;
+%template(svIntegratorStrongStochasticRungeKuttaSRA2) svIntegratorStrongStochasticRungeKuttaSRA<2>;
+%template(svIntegratorStrongStochasticRungeKuttaSRA3) svIntegratorStrongStochasticRungeKuttaSRA<3>;
+
+%include "../_GeneralModuleFiles/svIntegratorRK4.h"
+
+%include "svIntegratorEuler.h"
+%include "svIntegratorRK2.h"
+%include "svIntegratorRKF45.h"
+%include "svIntegratorRKF78.h"
+%pythoncode %{
+for _adaptive_rk_class in _rk_adaptive_base_classes.values():
+    _adaptive_rk_class.relTol = property(
+        _adaptive_rk_class.getRelativeTolerance,
+        _adaptive_rk_class.setRelativeTolerance,
+    )
+    _adaptive_rk_class.absTol = property(
+        _adaptive_rk_class.getAbsoluteTolerance,
+        _adaptive_rk_class.setAbsoluteTolerance,
+    )
+del _adaptive_rk_class
+%}
+%include "svStochasticIntegratorMayurama.h"
+%include "svStochasticIntegratorW2Ito.h"
+%include "svStochasticIntegratorW2Ito1.h"
+%include "svStochasticIntegratorW2Ito2.h"
+%include "svStochasticIntegratorSRIW1.h"
+%include "svStochasticIntegratorSOSRI.h"
+%include "svStochasticIntegratorSRA1.h"
+%include "svStochasticIntegratorSOSRA.h"
+%include "svStochasticIntegratorEulerHeun.h"
+%include "svStochasticIntegratorRKMil.h"
+%include "svStochasticIntegratorSIESME.h"
+%include "svStochasticIntegratorRDI1WM.h"
+%include "svStochasticIntegratorDRI1.h"
+%pythoncode %{
+svStochasticIntegratorDRI1.nonMixing = property(
+    svStochasticIntegratorDRI1.getNonMixing,
+    svStochasticIntegratorDRI1.setNonMixing,
+)
+%}
+%include "svStochasticIntegratorRS.h"
+
+// The following methods allow users to create new Runge-Kutta
+// methods simply by providing their coefficients on the Python side
+%pythoncode %{
+from typing import Sequence, Union
+import numpy as np
+
+def _coefficient_array(name, values, dimensions):
+    try:
+        result = np.asarray(values, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a non-ragged numeric array") from error
+    if result.ndim != dimensions:
+        shape_name = "matrix" if dimensions == 2 else "vector"
+        raise ValueError(f"{name} must be a {shape_name}")
+    if not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} must contain only finite values")
+    return result
+
+def _validate_coefficients(a_coefficients, **array_coefficients):
+    a_array = _coefficient_array("a_coefficients", a_coefficients, 2)
+    if a_array.shape[0] != a_array.shape[1]:
+        raise ValueError("a_coefficients must be a square matrix")
+    if np.any(np.triu(a_array) != 0.0):
+        raise ValueError(
+            "a_coefficients must be strictly lower triangular for an "
+            "explicit Runge-Kutta method"
+        )
+
+    stages = a_array.shape[0]
+    for input_name, values in array_coefficients.items():
+        array_coefficient = _coefficient_array(input_name, values, 1)
+        if array_coefficient.shape[0] != stages:
+            raise ValueError(
+                f"The size of a_coefficients is {stages}x{stages}, "
+                f"but the size of {input_name} is {array_coefficient.shape[0]}. "
+                 "These must be consistent")
+    return stages
+
+def svIntegratorRungeKutta(
+    dynamic_object,
+    a_coefficients: Union[Sequence[Sequence[float]], np.ndarray],
+    b_coefficients: Union[Sequence[float], np.ndarray],
+    c_coefficients: Union[Sequence[float], np.ndarray],
+    ) -> StateVecIntegrator:
+    """Generates an explicit, fixed-step Runge-Kutta integrator
+    from the given coefficients.
+
+    The coefficients for an RK method are normally expressed
+    in a Butcher table, with the `a_coefficients` being a lower
+    triangular square matrix, the `b_coefficients` being the
+    bottom of the table, and the `c_coefficients` being on the
+    left side.
+
+    Args:
+        a_coefficients (Sequence[Sequence[float]] | np.ndarray):
+            "a" matrix in the Butcher table.
+        b_coefficients (Sequence[float] | np.ndarray):
+            "b" array in the Butcher table
+        c_coefficients (Sequence[float] | np.ndarray):
+            "c" array in the Butcher table
+
+    Returns:
+        StateVecIntegrator: A Runge-Kutta integrator object
+    """
+    stages = _validate_coefficients(
+        a_coefficients,
+        b_coefficients=b_coefficients,
+        c_coefficients=c_coefficients,
+    )
+    if stages not in _rk_base_classes:
+        raise ValueError(f"Unsupported Runge-Kutta stage count: {stages}")
+
+    return _rk_base_classes[stages](dynamic_object, a_coefficients, b_coefficients, c_coefficients)
+
+def svIntegratorAdaptiveRungeKutta(
+    dynamic_object,
+    largest_order: float,
+    a_coefficients: Union[Sequence[Sequence[float]], np.ndarray],
+    b_coefficients: Union[Sequence[float], np.ndarray],
+    b_star_coefficients: Union[Sequence[float], np.ndarray],
+    c_coefficients: Union[Sequence[float], np.ndarray],
+    ) -> StateVecIntegrator:
+    """Generates an explicit, adaptive Runge-Kutta integrator
+    from the given coefficients.
+
+    The coefficients for an RK method are normally expressed
+    in a Butcher table, with the `a_coefficients` being a lower
+    triangular square matrix, the `b_coefficients` being the
+    bottom of the table, and the `c_coefficients` being on the
+    left side. Finally, `b_star_coefficients` are also usually
+    represented at the bottom of the table. These coefficients
+    represent those of the lower order RK method.
+
+    Args:
+        largest_order (float): The order of the higher-order RK method
+            used in this adaptive RK method. For example, for RKF45,
+            largest_order should be 5.
+        a_coefficients (Sequence[Sequence[float]] | np.ndarray):
+            "a" matrix in the Butcher table.
+        b_coefficients (Sequence[float] | np.ndarray):
+            "b" array in the Butcher table
+        b_star_coefficients (Sequence[float] | np.ndarray):
+            "b" array for the lower order method in the Butcher table
+        c_coefficients (Sequence[float] | np.ndarray):
+            "c" array in the Butcher table
+
+    Returns:
+        StateVecIntegrator: A Runge-Kutta integrator object
+    """
+    stages = _validate_coefficients(
+      a_coefficients, b_coefficients=b_coefficients,
+      b_star_coefficients=b_star_coefficients, c_coefficients=c_coefficients)
+    try:
+        largest_order = float(largest_order)
+    except (TypeError, ValueError) as error:
+        raise ValueError("largest_order must be finite and positive") from error
+    if not np.isfinite(largest_order) or largest_order <= 0:
+        raise ValueError("largest_order must be finite and positive")
+    if stages not in _rk_adaptive_base_classes:
+        raise ValueError(f"Unsupported adaptive Runge-Kutta stage count: {stages}")
+
+    return _rk_adaptive_base_classes[stages](dynamic_object, a_coefficients, b_coefficients, b_star_coefficients, c_coefficients, largest_order)
+
+import sys
+protectAllClasses(sys.modules[__name__])
+%}

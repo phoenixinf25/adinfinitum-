@@ -1,0 +1,147 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = [
+    "setuptools>=77.0.3,<=84.0.0",   # Required for "bdist_wheel" to work correctly and for PEP 639 license metadata.
+    "setuptools-scm>=8.0,<=10.3.4",  # Automatically include all Git-controlled files in sdist
+    "packaging>=24.0,<=26.3",
+    "tomli>=2.0.1,<3; python_version < '3.11'",
+
+    # needed to find the numpy include headers,
+    # pin to lowest runtime allowed version to take advantage of backwards compatibility
+    "numpy>=1.24.4,<2.4.0;  python_version < '3.13'",
+    "numpy>=2.0,<2.4.0;     python_version >= '3.13' and python_version < '3.15'",
+    # NumPy 2.5.2 introduced wheels for standard CPython 3.15.
+    "numpy>=2.5.2,<=2.5.4;  python_version >= '3.15'",
+
+    # Requirements for building Basilisk through conanfile
+    "conan>=2.4.0,<=2.33.0",
+    "cmake>=3.26,<=4.4.4",
+    "swig>=4.4.1,<5",  # Require SWIG ABI 5 support for Basilisk and compatible extensions.
+    "libclang>=15.0.6.1,<=18.1.1"  # Required by generatePayloadMetaJson.py (message code generation)
+]
+
+[project]
+name        = 'bsk'
+dynamic     = ["version", "dependencies"]
+requires-python = ">=3.9, <3.16"
+
+readme      = "README.md"
+license     = "ISC"
+license-files = ["LICENSE", "LICENSES/RUST-THIRD-PARTY.txt"]
+description = "Basilisk: an Astrodynamics Simulation Framework"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.urls]
+homepage = 'https://avslab.github.io/basilisk/'
+documentation = 'https://avslab.github.io/basilisk/'
+source = "https://github.com/AVSLab/basilisk"
+tracker = "https://github.com/AVSLab/basilisk/issues"
+
+# Define console scripts here
+[project.scripts]
+bskLargeData = "Basilisk.utilities.bskLargeData:main"
+bskExamples = "Basilisk.utilities.bskExamples:main"
+
+[tool.setuptools]
+packages = []  # XXX: Leave blank, populated automatically by setup.py.
+include-package-data = true
+
+[tool.setuptools.package-data]
+"*" = ["*.so", "*.dll", "*.lib", "*.pyd", "*.a", "*.dylib"]  # Include all built objects.
+
+[tool.setuptools.dynamic]
+version = {file = "docs/source/bskVersion.txt"}
+dependencies = {file = "requirements.txt"}
+
+[project.optional-dependencies]
+test = [
+  "psutil",
+  "pytest-error-for-skips",
+  "pytest",
+]
+examples = [
+  'scipy==1.13.1; python_version < "3.10"',
+  'scipy==1.15.3; python_version >= "3.10" and python_version < "3.11"',
+  'scipy>=1.17.1,<=1.18.1; python_version >= "3.11"',
+  # Match development requirements for NumPy 2.5 and Python 3.15 compatibility.
+  'numba>=0.68.0,<=0.68.0; python_version >= "3.15"',
+  'numba>=0.67.0,<=0.68.0; python_version >= "3.12" and python_version < "3.15"',
+  'numba<=0.68.0; python_version < "3.12"',
+]
+opnav = [
+  "bsk-opnav",
+]
+all = [
+  "bsk-opnav",
+]
+
+[tool.cibuildwheel]
+build = ["cp39-*", "cp310-*", "cp311-*", "cp312-*", "cp313-*", "cp314-*", "cp315-*"]
+skip  = ["*-win32", "*-musllinux_*"]
+build-verbosity = 1
+# Preserve the existing wheel checks; cibuildwheel 4 enables an ABI audit by default.
+audit-command = ""
+before-build = "python .github/scripts/configure_conan_retries.py && pip install \"libclang>=15.0.6.1,<=18.1.1\" ninja"
+test-extras = ["test"]
+test-command = "bskLargeData && pytest -v {project}/src/tests -m \"not ciSkip and not scenarioTest\""
+
+[tool.cibuildwheel.environment]
+CMAKE_BUILD_TYPE = "Release"
+
+[tool.cibuildwheel.macos.environment]
+MACOSX_DEPLOYMENT_TARGET = "11.0"
+CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
+
+[tool.cibuildwheel.windows]
+before-build = "python .github/scripts/configure_conan_retries.py && pip install \"libclang>=15.0.6.1,<=18.1.1\" delvewheel ninja"
+repair-wheel-command = "python -m delvewheel repair -v --ignore-existing --analyze-existing -w {dest_dir} {wheel}"
+
+[tool.cibuildwheel.linux]
+archs = ["native"]
+# Rust module support (--rustModules, see src/cmake/bskFindRustModules.cmake)
+# is experimental and off by default, but the manylinux container has no
+# Rust/Cargo toolchain at all, so it is bootstrapped here unconditionally.
+# This lets nightly, test, and release wheel jobs build Rust modules through
+# the pinned Corrosion integration on every Linux wheel platform.
+# CI supplies the exact Rust version resolved once for the workflow run.
+before-all = "python -m pip install 'conan>=2.4.0,<=2.33.0' && python -m conans.conan profile detect --force && conan_home=\"${CONAN_HOME:-$HOME/.conan2}\" && mkdir -p \"$conan_home\" && touch \"$conan_home/global.conf\" && for setting in 'tools.system.package_manager:mode=install' 'tools.system.package_manager:sudo=False'; do grep -qxF \"$setting\" \"$conan_home/global.conf\" || printf '%s\\n' \"$setting\" >> \"$conan_home/global.conf\"; done && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain \"${RUSTUP_TOOLCHAIN:-stable}\""
+repair-wheel-command = [
+  "auditwheel repair --strip -w {dest_dir} {wheel}"
+]
+manylinux-x86_64-image  = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+# cibuildwheel runs Linux builds inside a manylinux container so host env vars
+# that toggles MuJoCo/OpNav aren't visible to the build unless explicitly
+# forwarded.
+environment-pass = ["CONAN_ARGS", "RUSTUP_TOOLCHAIN", "CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER"]
+
+[tool.cibuildwheel.linux.environment]
+# rustup (installed by before-all above) puts cargo/rustc here; before-all
+# runs in its own subprocess so this can't be exported from there directly --
+# see https://cibuildwheel.pypa.io/en/stable/faq/#building-rust-wheels.
+PATH = "$HOME/.cargo/bin:$PATH"
+
+[tool.pytest.ini_options]
+testpaths = [
+  "src",
+  "benchmarks/tests",
+]
+markers = [
+  "slowtest: mark a test as a slow unit test.",
+  "scenarioTest: mark a test as a tutorial scenario test.",
+  "ciSkip: mark a test that should be skipped on the CI test runs",
+  "docsIntegration: documentation-tool integration test run explicitly by docs CI",
+  "buildIntegration: native build regression test run explicitly by platform CI",
+]

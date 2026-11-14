@@ -1,0 +1,380 @@
+# ISC License
+#
+# Copyright (c) 2016, Autonomous Vehicle Systems Lab, University of Colorado at Boulder
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+
+#
+#   Unit Test Script
+#   Module Name:        simpleInstrumentController
+#   Author:             Adam Herrmann
+#   Creation Date:      May 19th, 2020
+#
+
+import inspect
+import os
+
+import pytest
+
+filename = inspect.getframeinfo(inspect.currentframe()).filename
+path = os.path.dirname(os.path.abspath(filename))
+bskName = 'Basilisk'
+splitPath = path.split(bskName)
+
+# Import all of the modules that we are going to be called in this simulation
+from Basilisk.utilities import SimulationBaseClass
+from Basilisk.utilities import unitTestSupport
+from Basilisk.fswAlgorithms import simpleInstrumentController
+from Basilisk.utilities import macros
+from Basilisk.architecture import messaging
+from Basilisk.architecture import bskLogging
+
+from matplotlib import pyplot as plt
+
+# uncomment this line is this test is to be skipped in the global unit test run, adjust message as needed
+# @pytest.mark.skipif(conditionstring)
+# uncomment this line if this test has an expected failure, adjust message as needed
+# @pytest.mark.xfail(conditionstring)
+# provide a unique test method name, starting with test_
+
+tests = [(0, 0, 0, None, None, None, None, [1,0,0,1,0]), # rate disabled, device status not written, no controller status
+         (0, 0.01, 0.1, None, None, None, None, [1,0,0,1,0]), # rate disabled, rate noncompliant, device status not written, no controller status
+         (1, 0.01, 0.001, None, None, None, None, [1,0,0,1,0]), # rate enabled, rate compliant, device status not written, no controller status
+         (1, 0.01, 0.1, None, None, None, None, [0, 0, 0, 0, 0]), # rate enabled, rate noncompliant, device status not written, no controller status
+         (0, 0, 0, 1, 0, None, None, [1,0,0,1,0]), # rate disabled, device status of 1, controller status of 0
+         (0, 0, 0, 0, 1, None, None, [0, 0, 0, 0, 0]), # rate disabled, device status of 0, controller status of 1
+         (0, 0, 0, None, 1, None, None, [1,0,0,1,0]), # rate disabled, device status not written, controller status of 1
+         (1, 0.01, 0.001, None, None, 0, [1.0, 2.0], [1,0,0,1,0]), # rate enabled, immediate imaging (flag set to 0)
+         (1, 0.01, 0.001, None, None, 1, [0.0, 0.0], [1,0,0,1,0]), # rate enabled, immediate imaging (flag set to 1)
+         (1, 0.01, 0.001, 1, None, 1, [1.0, 1.0], [0,1,0,0,1]), # rate enabled, 1 second acquisition and allowed time
+         (1, 0.01, 0.001, 1, None, 1, [1.0, 0.0], [0,0,0,0,0]), # rate enabled, acquisition time greater than allowed time
+         (1, 0.01, 0.001, 1, None, 1, [1.0, 2.0], [0,1,0,0,1]), # rate enabled, acquisition time less than allowed time
+         (1, 0.01, 0.001, 1, None, 1, [-1.0, 2.0], [1,0,0,1,0]), # rate enabled, acquisition time negative, should image immediately
+         (1, 0.01, 0.001, 1, None, 1, [0.0, -1.0], [1,0,0,1,0]), # rate enabled, allowed time negative, but should image immediately (considered as 0.0)
+        ]
+@pytest.mark.parametrize('use_rate_limit,rate_limit,omega_mag,deviceStatus,controlStatus,useDuration,imagingTimes,expected_result', tests)
+def test_simple_instrument_controller(show_plots, use_rate_limit, rate_limit, omega_mag, deviceStatus, controlStatus, useDuration, imagingTimes, expected_result):
+    r"""
+    **Validation Test Description**
+
+    Unit test for simpleInstrumentController. The unit test specifically covers:
+
+    1. If the controller correctly sends an image command if access and attitude error are within bounds
+
+    2. If the controller does not image until the imaged variable is reset to 0
+
+    3. If the controller sends an image command again after the imaged variable has been reset to 0
+
+    4. If the rate tolerance limit only effects operation when enabled, and effects operation in the expected manner.
+
+    5. If the controller sends an image command when deviceStatusInMsg is set to 1 and the instrumentStatus is set to 0
+
+    6. If the controller does not send an image command when deviceStatusInMsg is set to 0 and the instrumentStatus is set to 1
+
+    7. If the controller does send an image command when deviceStatusInMsg is not written and the instrumentStatus is set to 1
+
+    8. If the controller correctly handles the duration-based imaging flag when set to 0 (immediate imaging)
+
+    9. If the controller correctly handles duration-based imaging when acquisitionTime and allowedTime are set to 0
+
+    10. If the controller correctly handles duration-based imaging when acquisitionTime and allowedTime are set to the same values (1.0 second)
+
+    11. If the controller correctly handles duration-based imaging when acquisitionTime is set to 1.0 second and allowedTime is set to 0 second (should not image)
+
+    12. If the controller correctly handles duration-based imaging when acquisitionTime is set to 1.0 second and allowedTime is set to 2.0 seconds (should image)
+
+    13. If the controller correctly handles duration-based imaging when acquisitionTime is set to -1.0 second and allowedTime is set to 2.0 seconds (should image immediately)
+
+    14. If the controller correctly handles duration-based imaging when acquisitionTime is set to 0.0 second and allowedTime is set to -1.0 seconds (should image immediately)
+    """
+    # each test method requires a single assert method to be called
+    # pass on the testPlotFixture so that the main test function may set the DataStore attributes
+    [testResults, testMessage] = simpleInstrumentControllerTestFunction(show_plots, use_rate_limit, rate_limit, omega_mag, deviceStatus, controlStatus, useDuration, imagingTimes, expected_result)
+
+    assert testResults < 1, testMessage
+
+# Tuple: timeToleranceLower [s], timeToleranceUpper [s], imagingTime [s], expected_result
+timeWindowTests = [
+    (0.0, 0.0, 2.0, [1, 0, 0, 1, 0]),  # zero tolerances disable the time criteria
+    (
+        1.0,
+        0.0,
+        2.0,
+        [0, 1, 0, 1, 0],
+    ),  # lower tolerance only: image at or after imagingTime - lower
+    (
+        0.0,
+        0.5,
+        2.0,
+        [1, 0, 0, 0, 0],
+    ),  # upper tolerance only: do not image after imagingTime + upper
+    (1.0, 1.0, 2.0, [0, 1, 0, 1, 0]),  # two-sided interval: image within [1s, 3s]
+    (
+        3.0,
+        1.0,
+        2.0,
+        [1, 0, 0, 1, 0],
+    ),  # lower tolerance larger than imagingTime should not underflow
+]
+
+
+@pytest.mark.parametrize(
+    "timeToleranceLower,timeToleranceUpper,imagingTime,expected_result", timeWindowTests
+)
+def test_simple_instrument_controller_time_window(
+    show_plots, timeToleranceLower, timeToleranceUpper, imagingTime, expected_result
+):
+    r"""
+    **Validation Test Description**
+
+    Unit test for simpleInstrumentController time-interval imaging criteria. The unit test covers:
+
+    1. If zero lower and upper tolerances preserve the prior behavior and do not constrain imaging time
+
+    2. If a lower tolerance prevents imaging before the desired imaging window
+
+    3. If an upper tolerance prevents imaging after the desired imaging window
+
+    4. If lower and upper tolerances create an inclusive two-sided imaging window
+
+    5. If a lower tolerance larger than the desired imaging time does not cause unsigned integer underflow
+    """
+    [testResults, testMessage] = simpleInstrumentControllerTestFunction(
+        show_plots,
+        timeToleranceLower=timeToleranceLower,
+        timeToleranceUpper=timeToleranceUpper,
+        imagingTime=imagingTime,
+        expected_result=expected_result,
+    )
+
+    assert testResults < 1, testMessage
+
+
+# Tuple: acquisitionTime [s], allowedTime [s], expected_result
+durationTimeWindowTests = [
+    (1.0, 3.0, [0, 0, 1, 0, 0]),  # acquisition completes before the capture window opens
+    (2.0, 3.0, [0, 0, 1, 0, 0]),  # acquisition completes inside the capture window
+    (1.0, 1.5, [0, 0, 0, 0, 0]),  # allowed time expires before the capture window opens
+    (
+        3.0,
+        4.0,
+        [0, 0, 0, 0, 0],
+    ),  # acquisition completes after the capture window closes
+]
+
+
+@pytest.mark.parametrize(
+    "acquisitionTime,allowedTime,expected_result", durationTimeWindowTests
+)
+def test_simple_instrument_controller_duration_time_window(
+    show_plots, acquisitionTime, allowedTime, expected_result
+):
+    r"""
+    **Validation Test Description**
+
+    Verify that duration-based imaging accumulates valid constraints before the capture window opens. An acquisition
+    that completes before or inside the [1.5, 2.5] second window must capture, while an acquisition that completes
+    after the window closes or whose allowed time expires before the window opens must not.
+    """
+    [testResults, testMessage] = simpleInstrumentControllerTestFunction(
+        show_plots,
+        useDuration=1,
+        imagingTimes=[acquisitionTime, allowedTime],
+        timeToleranceLower=0.5,
+        timeToleranceUpper=0.5,
+        imagingTime=2.0,
+        expected_result=expected_result,
+    )
+
+    assert testResults < 1, testMessage
+
+
+# Tuple: acquisitionTime [s], allowedTime [s], expected_result [-], expectedElapsedTime [s]
+elapsedTimeTests = [
+    (0.0, 2.0, [1, 0, 0, 1, 0], 0.0),  # zero acquisition duration images immediately
+    (1.0, 3.0, [0, 1, 0, 0, 1], 1.0),  # successful duration imaging stores acquisition duration
+    (2.0, 3.0, [0, 0, 1, 0, 0], 1.0),  # second attempt is still accumulating at the final update
+    (3.0, 2.0, [0, 0, 0, 0, 0], 2.0),  # failed duration imaging stores the elapsed attempt time
+    (3.0, 1.5, [0, 0, 0, 0, 0], 1.5),  # failed imaging clamps task-step overshoot to the allowed duration
+]
+
+
+@pytest.mark.parametrize(
+    "acquisitionTime,allowedTime,expected_result,expectedElapsedTime", elapsedTimeTests
+)
+def test_simple_instrument_controller_elapsed_time_access(
+    show_plots, acquisitionTime, allowedTime, expected_result, expectedElapsedTime
+):
+    r"""
+    **Validation Test Description**
+
+    Verify that duration-based imaging leaves the elapsed valid-constraint duration accessible for immediate,
+    successful, and failed imaging attempts.
+    """
+    [testResults, testMessage] = simpleInstrumentControllerTestFunction(
+        show_plots,
+        useDuration=1,
+        imagingTimes=[acquisitionTime, allowedTime],
+        expected_result=expected_result,
+        expectedElapsedTime=expectedElapsedTime,
+    )
+
+    assert testResults < 1, testMessage
+
+
+def simpleInstrumentControllerTestFunction(
+    show_plots,
+    use_rate_limit=1,
+    rate_limit=0.01,
+    omega_mag=0.001,
+    deviceStatus=None,
+    controlStatus=None,
+    useDuration=None,
+    imagingTimes=None,
+    expected_result=None,
+    timeToleranceLower=None,
+    timeToleranceUpper=None,
+    imagingTime=None,
+    expectedElapsedTime=None,
+):
+    testFailCount = 0                       # zero unit test result counter
+    testMessages = []                       # create empty array to store test log messages
+    unitTaskName = "unitTask"
+    unitProcessName = "TestProcess"
+    bskLogging.setDefaultLogLevel(bskLogging.WARNING)
+
+    # Create a sim module as an empty container
+    unitTestSim = SimulationBaseClass.SimBaseClass()
+
+    # Create test thread
+    testProcessRate = macros.sec2nano(1.0)
+    testProc = unitTestSim.CreateNewProcess(unitProcessName)
+    testProc.addTask(unitTestSim.CreateNewTask(unitTaskName, testProcessRate))
+
+    # Construct algorithm and associated C++ container
+    module = simpleInstrumentController.simpleInstrumentController()
+    module.ModelTag = "simpleInstrumentController"           # update python name of test module
+
+    # Add test module to runtime call list
+    unitTestSim.AddModelToTask(unitTaskName, module)
+
+    # Initialize the test module configuration data
+    module.attErrTolerance = 0.1                           # set the attitude error tolerance
+    module.rateErrTolerance = rate_limit                   # set the attitude rate error tolerance
+    module.useRateTolerance = use_rate_limit               # enable attitude rate error tolerance
+
+    # Create and write the ground location access message
+    inputAccessMsgData = messaging.AccessMsgPayload()
+    inputAccessMsgData.hasAccess = 1
+    inputAccessMsg = messaging.AccessMsg().write(inputAccessMsgData)
+
+    # Create and write the attitude guidance message
+    inputAttGuidMsgData = messaging.AttGuidMsgPayload()
+    inputAttGuidMsgData.sigma_BR = [0.01, 0.01, 0.01]
+    inputAttGuidMsgData.omega_BR_B = [omega_mag, 0.0, 0.0]
+    inputAttGuidMsg = messaging.AttGuidMsg().write(inputAttGuidMsgData)
+
+    # Create and write the device status message
+    if deviceStatus is not None:
+        inputDeviceStatusMsgData = messaging.DeviceStatusMsgPayload()
+        inputDeviceStatusMsgData.deviceStatus = deviceStatus
+        inputDeviceStatusMsg = messaging.DeviceStatusMsg().write(inputDeviceStatusMsgData)
+        module.deviceStatusInMsg.subscribeTo(inputDeviceStatusMsg)
+
+    # Set the controllerStatus variable
+    if controlStatus is not None:
+        module.controllerStatus = controlStatus
+
+    # Set the duration-based imaging variable
+    if useDuration is not None:
+        module.useDurationImaging = useDuration
+        acquisitionTime = imagingTimes[0]
+        allowedTime = imagingTimes[1]
+        module.acquisitionTime = macros.sec2nano(acquisitionTime)  # convert to nanoseconds
+        module.allowedTime = macros.sec2nano(allowedTime)  # convert to nanoseconds
+
+    if timeToleranceLower is not None:
+        module.timeToleranceLower = macros.sec2nano(timeToleranceLower)
+    if timeToleranceUpper is not None:
+        module.timeToleranceUpper = macros.sec2nano(timeToleranceUpper)
+    if imagingTime is not None:
+        module.imagingTime = macros.sec2nano(imagingTime)
+
+    # Setup logging on the test module output message so that we get all the writes to it
+    dataLog = module.deviceCmdOutMsg.recorder()
+    unitTestSim.AddModelToTask(unitTaskName, dataLog)
+
+    # connect the message interfaces
+    module.locationAccessInMsg.subscribeTo(inputAccessMsg)
+    module.attGuidInMsg.subscribeTo(inputAttGuidMsg)
+
+    # Need to call the self-init and cross-init methods
+    unitTestSim.InitializeSimulation()
+
+    # Set the simulation time.
+    # NOTE: the total simulation time may be longer than this value. The
+    # simulation is stopped at the next logging event on or after the
+    # simulation end time.
+    unitTestSim.ConfigureStopTime(macros.sec2nano(1.0))        # seconds to stop simulation
+
+    # Begin the simulation time run set above
+    unitTestSim.ExecuteSimulation()
+
+    # run the module again for an additional second
+    unitTestSim.ConfigureStopTime(macros.sec2nano(2.0))        # seconds to stop simulation
+    unitTestSim.ExecuteSimulation()
+
+    # Now change the imaged variable back to 0 and run again for another image
+    module.imaged = 0
+    unitTestSim.ConfigureStopTime(macros.sec2nano(4.0))        # seconds to stop simulation
+    unitTestSim.ExecuteSimulation()
+
+    if not unitTestSupport.isArrayEqual(dataLog.deviceCmd, expected_result, len(expected_result), 1e-12):
+        testFailCount += 1
+        testMessages.append("FAILED: " + module.ModelTag + " Module failed dataVector" + " unit test at t=" + str(dataLog.times()[0]*macros.NANO2SEC) + "sec\n")
+
+    if expectedElapsedTime is not None:
+        expectedElapsedTimeNano = macros.sec2nano(expectedElapsedTime)  # [ns]
+        if not unitTestSupport.isDoubleEqual(module.elapsedTime, expectedElapsedTimeNano, 1e-12):
+            testFailCount += 1
+            testMessages.append(
+                "FAILED: " + module.ModelTag + " Module failed elapsedTime unit test. "
+                + "Expected " + str(expectedElapsedTimeNano) + " ns but got "
+                + str(module.elapsedTime) + " ns.\n"
+            )
+
+    # Plots
+    plt.close("all")  # close all prior figures so we start with a clean slate
+    plt.figure(1)
+    plt.plot(dataLog.times() * macros.NANO2SEC, dataLog.deviceCmd)
+    plt.xlabel('Time [s]')
+    plt.ylabel('Device Status')
+    plt.suptitle('Device Status Over Time')
+
+    if show_plots:
+        plt.show()
+
+    # each test method requires a single assert method to be called
+    # this check below just makes sure no sub-test failures were found
+    return [testFailCount, ''.join(testMessages)]
+
+
+#
+# This statement below ensures that the unitTestScript can be run as a
+# stand-along python script
+#
+if __name__ == "__main__":
+    simpleInstrumentControllerTestFunction(
+        True        # show_plots
+    )

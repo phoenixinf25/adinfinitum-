@@ -1,0 +1,1205 @@
+cmake_minimum_required(VERSION 3.26)
+# cmake>=3.18 is required for FindPython3 to work. See https://github.com/pypa/manylinux/issues/613
+# cmake>=3.26 is required for FindPython3 SABIModule.
+# XXX: Some versions of CMake around 3.21~3.26 crash CMake on Windows. Reason and range is still TBD.
+
+
+
+project("basilisk")
+
+option(BSK_OFFLINE_BUILD "Prevent build tools from accessing the network" OFF)
+if(BSK_OFFLINE_BUILD)
+  set(ENV{CARGO_NET_OFFLINE} "true")
+endif()
+if(NOT BSK_FETCHCONTENT_CACHE_DIR)
+  get_filename_component(
+    BSK_FETCHCONTENT_CACHE_DIR
+    "${CMAKE_SOURCE_DIR}/../.bsk-cache/fetchcontent"
+    ABSOLUTE)
+endif()
+
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE
+      "Debug"
+      CACHE STRING "Choose the type of build, options are: Debug Release RelWithDebInfo MinSizeRel." FORCE)
+endif(NOT CMAKE_BUILD_TYPE)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_BINARY_DIR}/conan")
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_BINARY_DIR})
+
+list(APPEND CMAKE_PREFIX_PATH ${CMAKE_BINARY_DIR})
+list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_PREFIX_PATH "${CMAKE_BINARY_DIR}/conan")
+
+include(bskTargetExcludeBuildOptions)
+include(bskBuildInfo)
+include(bskCollectWrapperCustomFiles)
+include(bskCombineFswBindings)
+include(bskCombineSimulationBindings)
+include(bskFindRustModules)
+include(bskSourceInventory)
+
+# Inventory build-relevant source files once per top-level package root. All
+# wrapper and package discovery below filters these lists in memory.
+set(BSK_SOURCE_INVENTORY_ROOTS
+    "${CMAKE_SOURCE_DIR}/architecture"
+    "${CMAKE_SOURCE_DIR}/simulation"
+    "${CMAKE_SOURCE_DIR}/fswAlgorithms"
+    "${CMAKE_SOURCE_DIR}/moduleTemplates"
+    "${CMAKE_SOURCE_DIR}/topLevelModules")
+if(NOT "${EXTERNAL_MODULES_PATH}" STREQUAL "")
+  list(APPEND BSK_SOURCE_INVENTORY_ROOTS "${EXTERNAL_MODULES_PATH}")
+endif()
+bsk_collect_source_inventory(
+  BSK_SOURCE_INVENTORY
+  ${BSK_SOURCE_INVENTORY_ROOTS})
+bsk_index_source_inventory(${BSK_SOURCE_INVENTORY})
+
+set(BSK_HEADER_FILES ${BSK_SOURCE_INVENTORY})
+list(FILTER BSK_HEADER_FILES INCLUDE REGEX "\\.(h|hpp)$")
+set(BSK_INTERFACE_FILES ${BSK_SOURCE_INVENTORY})
+list(FILTER BSK_INTERFACE_FILES INCLUDE REGEX "\\.i$")
+set(BSK_PYTHON_FILES ${BSK_SOURCE_INVENTORY})
+list(FILTER BSK_PYTHON_FILES INCLUDE REGEX "\\.py$")
+set(BSK_CMAKE_FILES ${BSK_SOURCE_INVENTORY})
+list(FILTER BSK_CMAKE_FILES INCLUDE REGEX "\\.cmake$")
+set(BSK_CUSTOM_CMAKE_FILES ${BSK_CMAKE_FILES})
+list(FILTER BSK_CUSTOM_CMAKE_FILES INCLUDE REGEX "(^|/)Custom\\.cmake$")
+
+# Find necessary packages
+find_package(Python3 ${PYTHON_VERSION} EXACT REQUIRED COMPONENTS Interpreter Development.Module OPTIONAL_COMPONENTS Development.SABIModule)
+
+# Enforce the package's supported Python range and warn on deprecated versions.
+include(bskCheckPythonVersion)
+bsk_check_python_version("${CMAKE_CURRENT_SOURCE_DIR}/../pyproject.toml")
+if(Python3_VERSION VERSION_LESS "3.10")
+    message(WARNING "You are using Python ${Python3_VERSION}, but support for Python 3.9 is deprecated and will be removed in March 2027.")
+endif()
+
+find_package(SWIG 4.4.1...<5 REQUIRED COMPONENTS python)
+include(${SWIG_USE_FILE})
+# Have SWIG emit depfiles for every wrapper so nested %include and %import
+# changes trigger regeneration on all supported Basilisk generators.
+set(SWIG_USE_SWIG_DEPENDENCIES ON)
+
+# Set the Python module library to be linked to.
+set(PYTHON3_MODULE Python3::Module)
+if(PY_LIMITED_API AND NOT PY_LIMITED_API STREQUAL "")
+  message(VERBOSE "Requested Py_LIMITED_API=${PY_LIMITED_API}")
+  message(VERBOSE "(Refer to https://docs.python.org/3/c-api/stable.html#limited-c-api for details)")
+
+  if(NOT Python3_Development.SABIModule_FOUND)
+    message(FATAL_ERROR "Could not find the required Python3 Stable ABI module!")
+  endif()
+
+  # Set the Python API to limited mode, to provide wider ABI
+  # compatibility (basically, we can build a single Python wheel to
+  # support all future Python versions).
+  # See https://docs.python.org/3/c-api/stable.html
+  # NOTE: SWIG 4.4.1 or a newer supported 4.x release is required for SWIG ABI 5 support between Basilisk and compatible extensions.
+  add_definitions("-DPy_LIMITED_API=${PY_LIMITED_API}")  # Support for current Python version
+
+  # Force libraries to link to the Stable ABI module instead.
+  # This especially fixes an issue with Windows, because
+  set(PYTHON3_MODULE Python3::SABIModule)
+endif()
+
+# ! create_symlinks : create symlinks to support files in source rather than keeping them in dist The function takes one
+# required argument and N optional arguments. \argn: a list of supporting file paths
+#
+function(create_symlinks destinationPath)
+  # Do nothing if building in-source
+  if("${CMAKE_CURRENT_BINARY_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
+    return()
+  endif()
+
+  file(MAKE_DIRECTORY "${destinationPath}")
+  # Retire Finder metadata copied by earlier builds without touching the source.
+  file(REMOVE "${destinationPath}/.DS_Store")
+  foreach(filePath IN LISTS ARGN)
+    get_filename_component(fileName "${filePath}" NAME)
+    if(fileName STREQUAL ".DS_Store")
+      continue()
+    endif()
+
+    # Native paths passed as arguments must not contain shell escape characters.
+    set(linkPath "${destinationPath}/${fileName}")
+    cmake_path(NATIVE_PATH linkPath link)
+    cmake_path(NATIVE_PATH filePath target)
+
+    # Delete the files from the dist directory, and instead just link them to the files in source
+    file(REMOVE "${destinationPath}/${fileName}")
+
+    if(UNIX)
+      set(command ln -s "${target}" "${link}")
+    elseif(IS_DIRECTORY "${target}")
+      message(VERBOSE "Creating Directory Symbolic Link")
+      set(command cmd.exe /c mklink /D "${link}" "${target}")
+    else()
+      set(command cmd.exe /c mklink "${link}" "${target}")
+    endif()
+
+    execute_process(
+      COMMAND ${command}
+      RESULT_VARIABLE result
+      OUTPUT_VARIABLE output
+      ERROR_VARIABLE output)
+
+    # If the symlink is unsuccessful, then copy the file directly into dist
+    if(NOT ${result} EQUAL 0)
+      file(COPY "${filePath}" DESTINATION "${destinationPath}")
+      string(STRIP "${output}" output)
+      message(WARNING "Could not create symbolic link for ${target}: ${output}. Copied instead.")
+    endif()
+
+  endforeach(filePath)
+endfunction(create_symlinks)
+
+function(add_message_headers)
+  set(CMESSAGE_HEADER_FILES ${BSK_HEADER_FILES})
+  list(FILTER CMESSAGE_HEADER_FILES
+       INCLUDE REGEX "/msgPayloadDefC/[^/]+\\.h$")
+  set(CPPMESSAGE_HEADER_FILES ${BSK_HEADER_FILES})
+  list(FILTER CPPMESSAGE_HEADER_FILES
+       INCLUDE REGEX "/msgPayloadDefCpp/[^/]+\\.h$")
+  add_custom_target(msgPayloadDefC SOURCES ${CMESSAGE_HEADER_FILES})
+  add_custom_target(msgPayloadDefCpp SOURCES ${CPPMESSAGE_HEADER_FILES})
+  set_target_properties(msgPayloadDefC PROPERTIES FOLDER architecture)
+  set_target_properties(msgPayloadDefCpp PROPERTIES FOLDER architecture)
+endfunction(add_message_headers)
+
+# add header search directories
+include_directories("${CMAKE_BINARY_DIR}/autoSource")
+include_directories("${CMAKE_SOURCE_DIR}")
+
+function(generate_package_libraries INIT_DIRECTORY AllLibs)
+  # Find all _GeneralModuleFiles and put them into library targets so they aren't rewrapped, built with every module.
+
+  bsk_find_general_module_directories(
+    LIB_DIRS
+    "${INIT_DIRECTORY}"
+    BSK_SOURCE_INVENTORY)
+  foreach(LIB_DIR ${LIB_DIRS})
+
+    # Determine the name of the parent directory of _GeneralModuleFiles (i.e. dynamics, environment, etc)
+    get_filename_component(PARENT_DIRECTORY "${LIB_DIR}" DIRECTORY)
+    get_filename_component(PARENT_DIR_NAME "${PARENT_DIRECTORY}" NAME)
+    file(RELATIVE_PATH PARENT_DIR "${INIT_DIRECTORY}" "${PARENT_DIRECTORY}")
+
+    if(${PARENT_DIR_NAME} IN_LIST EXCLUDED_BSK_LIBRARIES)
+      message(VERBOSE "Skipped Package Library: ${PARENT_DIR_NAME}")
+        continue()
+    endif()
+
+    # Set the library name (ex. dynamicsLib, environmentLib, etc)
+    set(LIB_NAME "${PARENT_DIR_NAME}Lib")
+    bsk_get_directory_source_files(C_FILES "${LIB_DIR}")
+    list(FILTER C_FILES INCLUDE REGEX "\\.(c|cpp|h|hpp)$")
+    # A package library can explicitly own implementations that remain beside
+    # their module interfaces rather than under _GeneralModuleFiles.
+    set(PACKAGE_SOURCES_FILE "${LIB_DIR}/PackageSources.cmake")
+    if(PACKAGE_SOURCES_FILE IN_LIST BSK_CMAKE_FILES)
+      unset(BSK_PACKAGE_LIBRARY_SOURCES)
+      include("${PACKAGE_SOURCES_FILE}")
+      if(NOT DEFINED BSK_PACKAGE_LIBRARY_SOURCES)
+        message(FATAL_ERROR "${PACKAGE_SOURCES_FILE} does not declare BSK_PACKAGE_LIBRARY_SOURCES.")
+      endif()
+      foreach(PACKAGE_LIBRARY_SOURCE IN LISTS BSK_PACKAGE_LIBRARY_SOURCES)
+        cmake_path(
+          NORMAL_PATH
+          PACKAGE_LIBRARY_SOURCE
+          OUTPUT_VARIABLE NORMALIZED_PACKAGE_LIBRARY_SOURCE)
+        if(NOT EXISTS "${NORMALIZED_PACKAGE_LIBRARY_SOURCE}")
+          message(FATAL_ERROR "${PACKAGE_SOURCES_FILE} names missing source ${PACKAGE_LIBRARY_SOURCE}.")
+        endif()
+        list(APPEND C_FILES "${NORMALIZED_PACKAGE_LIBRARY_SOURCE}")
+      endforeach()
+    endif()
+    list(REMOVE_DUPLICATES C_FILES)
+
+    # Header-only _GeneralModuleFiles directories do not need an owning
+    # binary. In particular, a SHARED library without exported symbols is not
+    # valid on Windows. Their headers remain available through the source-tree
+    # include paths used by the consuming wrappers.
+    set(PACKAGE_IMPLEMENTATION_FILES ${C_FILES})
+    list(FILTER PACKAGE_IMPLEMENTATION_FILES INCLUDE REGEX "\\.(c|cpp)$")
+    if(NOT PACKAGE_IMPLEMENTATION_FILES)
+      message(VERBOSE "Skipped Header-Only Package Library: ${PARENT_DIR_NAME}")
+      continue()
+    endif()
+
+    foreach(PACKAGE_IMPLEMENTATION_FILE IN LISTS PACKAGE_IMPLEMENTATION_FILES)
+      bsk_claim_production_source(
+        "${PACKAGE_IMPLEMENTATION_FILE}"
+        "package library ${LIB_NAME}")
+    endforeach()
+
+    # Add Target
+    add_library(${LIB_NAME} SHARED ${C_FILES})
+
+    if(NOT "${INIT_DIRECTORY}" STREQUAL "${CMAKE_SOURCE_DIR}")
+      bsk_suppress_strict_warnings_for_sources(${C_FILES})
+    endif()
+
+    # Add to list of library
+    list(APPEND AllLibs ${LIB_NAME})
+
+    # If the library directory has a Custom.cmake, include that
+    set(PACKAGE_CUSTOM_FILE "${LIB_DIR}/Custom.cmake")
+    if(PACKAGE_CUSTOM_FILE IN_LIST BSK_CUSTOM_CMAKE_FILES)
+      message(VERBOSE "Including custom Custom.cmake for package lib: ${LIB_DIR}")
+      include("${PACKAGE_CUSTOM_FILE}")
+    endif()
+
+    # Link implementation-only support used while building each package.
+    target_link_libraries(${LIB_NAME} PRIVATE ModuleIdGenerator)
+    target_link_libraries(${LIB_NAME} PRIVATE Eigen3::Eigen3)
+
+    # Each package exposes only its nearest public package dependency.
+    # architectureLib is the public owner of the architecture leaf libraries.
+    if("${LIB_NAME}" STREQUAL "architectureLib")
+      target_link_libraries(${LIB_NAME} PUBLIC ArchitectureUtilities)
+      target_link_libraries(${LIB_NAME} PUBLIC cMsgCInterface)
+    elseif(${PARENT_DIR_NAME} STREQUAL "mujocoDynamics")
+      target_link_libraries(${LIB_NAME} PUBLIC dynamicsLib)
+    else()
+      target_link_libraries(${LIB_NAME} PUBLIC architectureLib)
+    endif()
+
+    # define build location, IDE generation specifications
+    set_target_properties(${LIB_NAME} PROPERTIES FOLDER ${PARENT_DIR})
+    set_target_properties(${LIB_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk")
+    set_target_properties(${LIB_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Basilisk")
+    set_target_properties(${LIB_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Basilisk")
+
+    # Define the location for the executable part of the library (.dll) files (Windows Only)
+    # https://cmake.org/cmake/help/v3.17/manual/cmake-buildsystem.7.html#output-artifacts for details
+    set_target_properties(${LIB_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk")
+    set_target_properties(${LIB_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Basilisk")
+    set_target_properties(${LIB_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Basilisk")
+
+    # Define the location of the import library file (.lib) needed for the .dll (Windows Only)
+    set_target_properties(${LIB_NAME} PROPERTIES ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk")
+    set_target_properties(${LIB_NAME} PROPERTIES ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Basilisk")
+    set_target_properties(${LIB_NAME} PROPERTIES ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Basilisk")
+  endforeach()
+  set(AllLibs
+      ${AllLibs}
+      PARENT_SCOPE)
+endfunction(generate_package_libraries)
+
+function(bsk_assert_architecture_link_ownership PACKAGE_LIBRARIES)
+  get_target_property(
+    ARCHITECTURE_INTERFACE_LIBRARIES
+    architectureLib
+    INTERFACE_LINK_LIBRARIES)
+  foreach(ARCHITECTURE_LEAF_LIBRARY ArchitectureUtilities cMsgCInterface)
+    set(ARCHITECTURE_LEAF_COUNT 0)
+    foreach(INTERFACE_LIBRARY IN LISTS ARCHITECTURE_INTERFACE_LIBRARIES)
+      if(INTERFACE_LIBRARY STREQUAL ARCHITECTURE_LEAF_LIBRARY)
+        math(EXPR ARCHITECTURE_LEAF_COUNT "${ARCHITECTURE_LEAF_COUNT} + 1")
+      endif()
+    endforeach()
+    if(NOT ARCHITECTURE_LEAF_COUNT EQUAL 1)
+      message(
+        FATAL_ERROR
+          "architectureLib must publicly own ${ARCHITECTURE_LEAF_LIBRARY} exactly once.")
+    endif()
+  endforeach()
+
+  foreach(PACKAGE_LIBRARY IN LISTS PACKAGE_LIBRARIES)
+    if(NOT TARGET "${PACKAGE_LIBRARY}" OR PACKAGE_LIBRARY STREQUAL "architectureLib")
+      continue()
+    endif()
+    get_target_property(
+      DIRECT_LINK_LIBRARIES
+      "${PACKAGE_LIBRARY}"
+      LINK_LIBRARIES)
+    foreach(ARCHITECTURE_LEAF_LIBRARY ArchitectureUtilities cMsgCInterface)
+      if(ARCHITECTURE_LEAF_LIBRARY IN_LIST DIRECT_LINK_LIBRARIES)
+        message(
+          FATAL_ERROR
+            "${PACKAGE_LIBRARY} links ${ARCHITECTURE_LEAF_LIBRARY} directly; link its nearest package dependency instead."
+        )
+      endif()
+    endforeach()
+  endforeach()
+endfunction(bsk_assert_architecture_link_ownership)
+
+function(find_package_targets PKG_DIR ALL_TARGET_LIST)
+  bsk_filter_source_inventory(
+    ABSOLUTE_SWIG_TARGETS
+    "${PKG_DIR}"
+    BSK_INTERFACE_FILES)
+  set(SWIG_TARGETS)
+  foreach(ABSOLUTE_SWIG_TARGET IN LISTS ABSOLUTE_SWIG_TARGETS)
+    file(RELATIVE_PATH SWIG_TARGET
+         "${CMAKE_SOURCE_DIR}" "${ABSOLUTE_SWIG_TARGET}")
+    list(APPEND SWIG_TARGETS "${SWIG_TARGET}")
+  endforeach()
+  # Direct Cargo commands can generate SWIG interfaces below a crate's
+  # target/ directory. Those are build products, not source modules.
+  list(FILTER SWIG_TARGETS EXCLUDE REGEX "(^|/)target(/|$)")
+  set(${ALL_TARGET_LIST}
+      ${SWIG_TARGETS}
+      PARENT_SCOPE)
+endfunction(find_package_targets)
+
+function(find_python_package_targets PKG_DIR ALL_TARGET_LIST)
+  bsk_filter_source_inventory(
+    ABSOLUTE_PYTHON_TARGETS
+    "${PKG_DIR}"
+    BSK_PYTHON_FILES)
+  set(PYTHON_TARGETS)
+  foreach(ABSOLUTE_PYTHON_TARGET IN LISTS ABSOLUTE_PYTHON_TARGETS)
+    file(RELATIVE_PATH PYTHON_TARGET
+         "${CMAKE_SOURCE_DIR}" "${ABSOLUTE_PYTHON_TARGET}")
+    list(APPEND PYTHON_TARGETS "${PYTHON_TARGET}")
+  endforeach()
+
+  set(FILTERED_TARGETS "")
+  foreach(PYTHON_TARGET ${PYTHON_TARGETS})
+    if(PYTHON_TARGET MATCHES "(^|/)(_UnitTest|_Documentation|_GeneralModuleFiles|__pycache__)(/|$)")
+      continue()
+    endif()
+
+    get_filename_component(TARGET_FILE ${PYTHON_TARGET} NAME)
+    if(TARGET_FILE STREQUAL "__init__.py")
+      continue()
+    endif()
+
+    get_filename_component(TARGET_NAME ${PYTHON_TARGET} NAME_WE)
+    get_filename_component(PARENT_DIR ${PYTHON_TARGET} DIRECTORY)
+    get_filename_component(PARENT_NAME ${PARENT_DIR} NAME)
+    if(TARGET_NAME STREQUAL PARENT_NAME AND NOT EXISTS "${CMAKE_SOURCE_DIR}/${PARENT_DIR}/${TARGET_NAME}.i")
+      list(APPEND FILTERED_TARGETS ${PYTHON_TARGET})
+    endif()
+  endforeach()
+
+  set(${ALL_TARGET_LIST}
+      ${FILTERED_TARGETS}
+      PARENT_SCOPE)
+endfunction(find_python_package_targets)
+
+function(bsk_cache_wrapper_source_ownership PARENT_DIR)
+  cmake_path(
+    ABSOLUTE_PATH
+    PARENT_DIR
+    BASE_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    NORMALIZE
+    OUTPUT_VARIABLE ABSOLUTE_PARENT_DIR)
+  string(SHA256 DIRECTORY_KEY "${ABSOLUTE_PARENT_DIR}")
+  get_property(
+    OWNERSHIP_IS_CACHED GLOBAL
+    PROPERTY "BSK_WRAPPER_OWNERSHIP_CACHED_${DIRECTORY_KEY}")
+  if(OWNERSHIP_IS_CACHED)
+    return()
+  endif()
+
+  bsk_get_directory_source_files(DIRECTORY_FILES "${ABSOLUTE_PARENT_DIR}")
+  set(IMPLEMENTATION_FILES ${DIRECTORY_FILES})
+  list(FILTER IMPLEMENTATION_FILES INCLUDE REGEX "\\.(c|cpp)$")
+  set(INTERFACE_FILES ${DIRECTORY_FILES})
+  list(FILTER INTERFACE_FILES INCLUDE REGEX "\\.i$")
+
+  # Package libraries are configured before wrappers and claim their production
+  # sources globally. Wrappers may compile only the remaining local sources.
+  set(AVAILABLE_IMPLEMENTATION_FILES)
+  foreach(IMPLEMENTATION_FILE IN LISTS IMPLEMENTATION_FILES)
+    bsk_get_production_source_owner(
+      IMPLEMENTATION_SOURCE_OWNER "${IMPLEMENTATION_FILE}")
+    if(NOT IMPLEMENTATION_SOURCE_OWNER)
+      list(APPEND AVAILABLE_IMPLEMENTATION_FILES "${IMPLEMENTATION_FILE}")
+    endif()
+  endforeach()
+
+  list(LENGTH INTERFACE_FILES INTERFACE_FILE_COUNT)
+  if(INTERFACE_FILE_COUNT LESS 2 OR NOT AVAILABLE_IMPLEMENTATION_FILES)
+    foreach(INTERFACE_FILE IN LISTS INTERFACE_FILES)
+      get_filename_component(INTERFACE_TARGET_NAME "${INTERFACE_FILE}" NAME_WE)
+      string(SHA256 TARGET_KEY "${ABSOLUTE_PARENT_DIR}/${INTERFACE_TARGET_NAME}")
+      if(INTERFACE_FILE_COUNT EQUAL 1)
+        set(TARGET_IMPLEMENTATION_FILES ${AVAILABLE_IMPLEMENTATION_FILES})
+      else()
+        set(TARGET_IMPLEMENTATION_FILES)
+      endif()
+      set_property(
+        GLOBAL
+        PROPERTY "BSK_WRAPPER_SOURCES_${TARGET_KEY}"
+                 "${TARGET_IMPLEMENTATION_FILES}")
+      foreach(TARGET_IMPLEMENTATION_FILE IN LISTS TARGET_IMPLEMENTATION_FILES)
+        bsk_claim_production_source(
+          "${TARGET_IMPLEMENTATION_FILE}"
+          "wrapper target ${INTERFACE_TARGET_NAME}")
+      endforeach()
+    endforeach()
+    set_property(
+      GLOBAL
+      PROPERTY "BSK_WRAPPER_OWNERSHIP_CACHED_${DIRECTORY_KEY}" TRUE)
+    return()
+  endif()
+
+  set(OWNERSHIP_FILE "${ABSOLUTE_PARENT_DIR}/ModuleSources.cmake")
+  if(NOT OWNERSHIP_FILE IN_LIST BSK_CMAKE_FILES)
+    message(
+      FATAL_ERROR
+        "${PARENT_DIR} contains multiple SWIG interfaces and local implementation sources. "
+        "Add ModuleSources.cmake with a BSK_MODULE_SOURCES_<target> declaration for every interface target."
+    )
+  endif()
+  include("${OWNERSHIP_FILE}")
+
+  set(DECLARED_IMPLEMENTATION_FILES)
+  foreach(INTERFACE_FILE IN LISTS INTERFACE_FILES)
+    get_filename_component(INTERFACE_TARGET_NAME "${INTERFACE_FILE}" NAME_WE)
+    set(MODULE_SOURCE_VARIABLE "BSK_MODULE_SOURCES_${INTERFACE_TARGET_NAME}")
+    if(NOT DEFINED ${MODULE_SOURCE_VARIABLE})
+      message(FATAL_ERROR "${OWNERSHIP_FILE} does not declare ${MODULE_SOURCE_VARIABLE}.")
+    endif()
+
+    set(TARGET_IMPLEMENTATION_FILES)
+    foreach(MODULE_SOURCE_FILE IN LISTS ${MODULE_SOURCE_VARIABLE})
+      cmake_path(
+        ABSOLUTE_PATH
+        MODULE_SOURCE_FILE
+        BASE_DIRECTORY "${ABSOLUTE_PARENT_DIR}"
+        NORMALIZE
+        OUTPUT_VARIABLE ABSOLUTE_MODULE_SOURCE_FILE)
+      if(NOT ABSOLUTE_MODULE_SOURCE_FILE IN_LIST AVAILABLE_IMPLEMENTATION_FILES)
+        message(
+          FATAL_ERROR
+            "${MODULE_SOURCE_VARIABLE} assigns ${MODULE_SOURCE_FILE}, which is not an available local implementation source."
+        )
+      endif()
+      if(ABSOLUTE_MODULE_SOURCE_FILE IN_LIST DECLARED_IMPLEMENTATION_FILES)
+        message(FATAL_ERROR "${MODULE_SOURCE_FILE} has more than one owner in ${OWNERSHIP_FILE}.")
+      endif()
+      list(APPEND DECLARED_IMPLEMENTATION_FILES "${ABSOLUTE_MODULE_SOURCE_FILE}")
+      list(APPEND TARGET_IMPLEMENTATION_FILES "${ABSOLUTE_MODULE_SOURCE_FILE}")
+      bsk_claim_production_source(
+        "${ABSOLUTE_MODULE_SOURCE_FILE}"
+        "wrapper target ${INTERFACE_TARGET_NAME}")
+    endforeach()
+
+    string(SHA256 TARGET_KEY "${ABSOLUTE_PARENT_DIR}/${INTERFACE_TARGET_NAME}")
+    set_property(
+      GLOBAL
+      PROPERTY "BSK_WRAPPER_SOURCES_${TARGET_KEY}"
+               "${TARGET_IMPLEMENTATION_FILES}")
+  endforeach()
+
+  foreach(IMPLEMENTATION_FILE IN LISTS AVAILABLE_IMPLEMENTATION_FILES)
+    if(NOT IMPLEMENTATION_FILE IN_LIST DECLARED_IMPLEMENTATION_FILES)
+      message(FATAL_ERROR "${IMPLEMENTATION_FILE} has no owner in ${OWNERSHIP_FILE}.")
+    endif()
+  endforeach()
+
+  set_property(
+    GLOBAL
+    PROPERTY "BSK_WRAPPER_OWNERSHIP_CACHED_${DIRECTORY_KEY}" TRUE)
+endfunction(bsk_cache_wrapper_source_ownership)
+
+function(bsk_select_wrapper_implementation_sources TARGET_NAME PARENT_DIR OUT_VAR)
+  cmake_path(
+    ABSOLUTE_PATH
+    PARENT_DIR
+    BASE_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    NORMALIZE
+    OUTPUT_VARIABLE ABSOLUTE_PARENT_DIR)
+  bsk_cache_wrapper_source_ownership("${ABSOLUTE_PARENT_DIR}")
+  string(SHA256 TARGET_KEY "${ABSOLUTE_PARENT_DIR}/${TARGET_NAME}")
+  get_property(
+    TARGET_IMPLEMENTATION_FILES GLOBAL
+    PROPERTY "BSK_WRAPPER_SOURCES_${TARGET_KEY}")
+  set(${OUT_VAR} ${TARGET_IMPLEMENTATION_FILES} PARENT_SCOPE)
+endfunction(bsk_select_wrapper_implementation_sources)
+
+function(bsk_include_wrapper_custom_files TARGET_FILE TARGET_NAME PARENT_DIR MODULE_DIR)
+  bsk_collect_wrapper_custom_files(
+    CUSTOM_FILES
+    "${PARENT_DIR}"
+    "${MODULE_DIR}"
+    "${CMAKE_SOURCE_DIR}"
+    "${EXTERNAL_MODULES_PATH}"
+    "${BSK_CUSTOM_CMAKE_FILES}")
+  foreach(CUSTOM_FILE IN LISTS CUSTOM_FILES)
+    message(VERBOSE "Including custom Custom.cmake for: ${TARGET_FILE}")
+    include("${CUSTOM_FILE}")
+  endforeach()
+endfunction(bsk_include_wrapper_custom_files)
+
+function(generate_package_targets TARGET_LIST LIB_DEP_LIST MODULE_DIR)
+  foreach(TARGET_FILE ${TARGET_LIST})
+    get_filename_component(TARGET_NAME ${TARGET_FILE} NAME_WE)
+    get_filename_component(PARENT_DIR ${TARGET_FILE} DIRECTORY)
+
+    if(${TARGET_NAME} IN_LIST EXCLUDED_BSK_TARGETS)
+      message(VERBOSE "Skipped Target: ${TARGET_NAME}")
+        continue()
+    endif()
+
+    bsk_get_directory_source_files(C_FILES "${PARENT_DIR}")
+    list(FILTER C_FILES INCLUDE REGEX "\\.(c|cpp|h|hpp|cmake|rst)$")
+
+    # Compile only the implementation sources owned by this wrapper. Keep the
+    # neighboring headers and documentation attached for dependency and IDE use.
+    bsk_select_wrapper_implementation_sources(
+      "${TARGET_NAME}" "${PARENT_DIR}" WRAPPER_IMPLEMENTATION_FILES)
+    set(WRAPPER_FILES ${C_FILES})
+    list(FILTER WRAPPER_FILES EXCLUDE REGEX "\\.(c|cpp)$")
+    list(APPEND WRAPPER_FILES ${WRAPPER_IMPLEMENTATION_FILES})
+
+    set(MODULE_NAME "${TARGET_NAME}")
+    set(WRAPPER_LIBRARY_TYPE MODULE)
+    bsk_select_simulation_binding_group(BINDING_GROUP "${MODULE_NAME}" "${PARENT_DIR}" "${MODULE_DIR}")
+    if(BINDING_GROUP)
+      set(TARGET_NAME "${MODULE_NAME}GroupedObjects")
+      set(WRAPPER_LIBRARY_TYPE OBJECT)
+      set_property(SOURCE ${TARGET_FILE} APPEND PROPERTY SWIG_FLAGS "-interface" "_${MODULE_NAME}")
+      set_property(GLOBAL APPEND PROPERTY BSK_${BINDING_GROUP}_OBJECT_TARGETS "${TARGET_NAME}")
+      set_property(GLOBAL APPEND PROPERTY BSK_${BINDING_GROUP}_MODULES "${MODULE_DIR}.${MODULE_NAME}")
+      file(STRINGS "${CMAKE_SOURCE_DIR}/${TARGET_FILE}" SWIG_MODULE_LINE REGEX "^[ \t]*%module")
+      if(NOT SWIG_MODULE_LINE MATCHES "%module(\\([^)]*\\))?[ \t]+([A-Za-z_][A-Za-z_0-9]*)")
+        message(FATAL_ERROR "Cannot determine the Python module name in ${TARGET_FILE}")
+      endif()
+      set_property(GLOBAL APPEND PROPERTY BSK_${BINDING_GROUP}_PROXIES
+        "${MODULE_DIR}.${MODULE_NAME}=${MODULE_DIR}.${CMAKE_MATCH_2}")
+    elseif("${MODULE_DIR}" STREQUAL "fswAlgorithms")
+      bsk_collect_wrapper_custom_files(
+        FSW_CUSTOM_FILES "${PARENT_DIR}" "${MODULE_DIR}" "${CMAKE_SOURCE_DIR}"
+        "${EXTERNAL_MODULES_PATH}" "${BSK_CUSTOM_CMAKE_FILES}")
+      if(NOT FSW_CUSTOM_FILES)
+        set(TARGET_NAME "${MODULE_NAME}FswObjects")
+        set(WRAPPER_LIBRARY_TYPE OBJECT)
+        set(BINDING_GROUP fswCoreNative)
+        # Keep each Python extension's original name and initialization entry point.
+        set_property(SOURCE ${TARGET_FILE} APPEND PROPERTY SWIG_FLAGS "-interface" "_${MODULE_NAME}")
+        set_property(GLOBAL APPEND PROPERTY BSK_FSW_OBJECT_TARGETS "${TARGET_NAME}")
+        set_property(GLOBAL APPEND PROPERTY BSK_FSW_COMBINED_MODULES "${MODULE_NAME}")
+      endif()
+      set_property(GLOBAL APPEND PROPERTY BSK_FSW_BINDING_TARGETS "${TARGET_NAME}")
+    endif()
+    if(MODULE_DIR STREQUAL "simulation" OR MODULE_DIR STREQUAL "fswAlgorithms")
+      set_property(GLOBAL APPEND PROPERTY BSK_SIMULATION_BINDING_TARGETS "${TARGET_NAME}")
+    endif()
+
+    set_property(SOURCE ${TARGET_FILE} PROPERTY USE_TARGET_INCLUDE_DIRECTORIES TRUE) # Allows for include paths in the
+                                                                                     # .i files
+    set_property(SOURCE ${TARGET_FILE} PROPERTY CPLUSPLUS ON)
+
+    swig_add_library(
+      ${TARGET_NAME}
+      LANGUAGE "python"
+      TYPE ${WRAPPER_LIBRARY_TYPE}
+      SOURCES ${TARGET_FILE}
+              ${WRAPPER_FILES}
+              # TODO: Following commented lines will become default with future imports OUTFILE_DIR
+              # "${CMAKE_BINARY_DIR}/Basilisk/${PARENT_DIR}" #_wrap.c/.cxx file OUTPUT_DIR
+              # "${CMAKE_BINARY_DIR}/Basilisk/${PARENT_DIR}") # generated .py file
+              OUTFILE_DIR
+              "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}" # _wrap.c/.cxx file
+              OUTPUT_DIR
+              "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}") # generated .py file
+
+    bsk_suppress_strict_warnings_for_sources(
+      "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}/${MODULE_NAME}PYTHON_wrap.cxx")
+
+    if(WRAPPER_LIBRARY_TYPE STREQUAL "OBJECT")
+      set_target_properties(${TARGET_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+      if(BINDING_GROUP STREQUAL "mujocoNative")
+        # Retain shared director RTTI and callbacks while making SWIG's
+        # per-wrapper external mutex definitions one C++17 inline variable.
+        set(SWIG_WRAPPER "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}/${MODULE_NAME}PYTHON_wrap.cxx")
+        set(GROUPED_WRAPPER "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}/${MODULE_NAME}PYTHON_grouped.cxx")
+        add_custom_command(OUTPUT "${GROUPED_WRAPPER}"
+          COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/prepareGroupedWrapper.py"
+            "${SWIG_WRAPPER}" "${GROUPED_WRAPPER}"
+          DEPENDS "${SWIG_WRAPPER}" "${CMAKE_SOURCE_DIR}/cmake/prepareGroupedWrapper.py"
+          COMMENT "Preparing ${MODULE_NAME} for the MuJoCo binding group" VERBATIM)
+        get_target_property(WRAPPER_SOURCES ${TARGET_NAME} SOURCES)
+        list(REMOVE_ITEM WRAPPER_SOURCES "${SWIG_WRAPPER}")
+        set_property(TARGET ${TARGET_NAME} PROPERTY SOURCES ${WRAPPER_SOURCES} "${GROUPED_WRAPPER}")
+        bsk_suppress_strict_warnings_for_sources("${GROUPED_WRAPPER}")
+      endif()
+      bsk_isolate_fsw_symbols("${MODULE_NAME}" ${WRAPPER_IMPLEMENTATION_FILES}
+        "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}/${MODULE_NAME}PYTHON_wrap.cxx")
+      add_custom_target(${MODULE_NAME})
+      add_dependencies(${MODULE_NAME} ${BINDING_GROUP})
+    endif()
+
+    if("${MODULE_DIR}" STREQUAL "ExternalModules")
+      bsk_suppress_strict_warnings_for_sources(${C_FILES})
+    else()
+      foreach(THIRD_PARTY_SOURCE IN LISTS BSK_THIRD_PARTY_SOURCE_FILES)
+        if(THIRD_PARTY_SOURCE IN_LIST C_FILES)
+          bsk_suppress_strict_warnings_for_sources("${THIRD_PARTY_SOURCE}")
+        endif()
+      endforeach()
+    endif()
+
+    # Collect module-local and shared package dependencies.
+    bsk_include_wrapper_custom_files("${TARGET_FILE}" "${TARGET_NAME}" "${PARENT_DIR}" "${MODULE_DIR}")
+
+    target_include_directories(${TARGET_NAME} PRIVATE ${Python3_INCLUDE_DIRS}) # Exposes python.h to wrap.c(xx) file
+    target_include_directories(
+      ${TARGET_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/${PARENT_DIR}) # Exposes module .h files to the PYTHON_wrap.c(xx) file
+                                                                # (not located in src)
+
+    target_include_directories(${TARGET_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/architecture/_GeneralModuleFiles"
+    )# Exposes framework files for easy includes
+    target_include_directories(${TARGET_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/../libs") # Exposes third party library
+                                                                                     # include folders
+
+    # Link all necessary libraries
+    foreach(LIB ${LIB_DEP_LIST})
+      target_link_libraries(${TARGET_NAME} PRIVATE ${LIB})
+    endforeach()
+
+    target_link_libraries(${TARGET_NAME} PRIVATE ${PYTHON3_MODULE})
+    if(PY_LIMITED_API AND NOT PY_LIMITED_API STREQUAL "")
+      target_compile_definitions(${TARGET_NAME} PRIVATE "Py_LIMITED_API=${PY_LIMITED_API}")
+    endif()
+
+    if(${MODULE_DIR} STREQUAL "ExternalModules")
+      set_target_properties(${TARGET_NAME} PROPERTIES FOLDER ${MODULE_DIR})
+    else()
+      set_target_properties(${TARGET_NAME} PROPERTIES FOLDER ${PARENT_DIR}) # define folder in IDE
+    endif()
+    # Define the location for the .so / .dylib file
+    set_target_properties(${TARGET_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY
+                                                    "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}")
+    set_target_properties(${TARGET_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY_DEBUG
+                                                    "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}")
+    set_target_properties(${TARGET_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY_RELEASE
+                                                    "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}")
+
+    # Define the location for the executable part of the library (.dll) files (Windows Only)
+    # https://cmake.org/cmake/help/v3.17/manual/cmake-buildsystem.7.html#output-artifacts for details
+    set_target_properties(${TARGET_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY
+                                                    "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}")
+    set_target_properties(${TARGET_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_DEBUG
+                                                    "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}")
+    set_target_properties(${TARGET_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE
+                                                    "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}")
+
+    # Define the location of the import library file (.lib) needed for the .dll (Windows Only)
+    set_target_properties(${TARGET_NAME} PROPERTIES ARCHIVE_OUTPUT_DIRECTORY
+                                                    "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}")
+    set_target_properties(${TARGET_NAME} PROPERTIES ARCHIVE_OUTPUT_DIRECTORY_DEBUG
+                                                    "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}")
+    set_target_properties(${TARGET_NAME} PROPERTIES ARCHIVE_OUTPUT_DIRECTORY_RELEASE
+                                                    "${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}")
+  endforeach()
+endfunction(generate_package_targets)
+
+function(generate_python_package_targets TARGET_LIST MODULE_DIR)
+  foreach(TARGET_FILE ${TARGET_LIST})
+    create_symlinks("${CMAKE_BINARY_DIR}/Basilisk/${MODULE_DIR}" "${CMAKE_SOURCE_DIR}/${TARGET_FILE}")
+  endforeach()
+endfunction(generate_python_package_targets)
+
+# Start of main projection configuration
+
+include(CTest)
+if(BUILD_TESTING)
+  include(FetchContent)
+  set(_googletest_source_dir
+      "${BSK_FETCHCONTENT_CACHE_DIR}/googletest-v1.17.0")
+  if(EXISTS "${_googletest_source_dir}/CMakeLists.txt")
+    set(FETCHCONTENT_SOURCE_DIR_GOOGLETEST
+        "${_googletest_source_dir}"
+        CACHE PATH "Use cached GoogleTest sources" FORCE)
+  elseif(BSK_OFFLINE_BUILD)
+    message(FATAL_ERROR
+      "Offline test build requires cached GoogleTest 1.17.0 sources at "
+      "${_googletest_source_dir}. Run the same build once without --offline "
+      "while connected, then retry offline.")
+  else()
+    unset(FETCHCONTENT_SOURCE_DIR_GOOGLETEST CACHE)
+  endif()
+  FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.17.0.zip
+    SOURCE_DIR "${_googletest_source_dir}"
+    BINARY_DIR "${CMAKE_BINARY_DIR}/_deps/googletest-build"
+  )
+  # For Windows: Prevent overriding the parent project's compiler/linker settings
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
+  include(GoogleTest)
+endif()
+
+
+# TODO: Remove the global link-libraries call
+find_package(Eigen3 CONFIG REQUIRED QUIET)
+# The following lines are necessary to prevent Xcode from issuing a warning about Eigen not being within the search
+# path. Related to Eigen being a header only library.
+if(DEFINED Eigen3_INCLUDE_DIRS_DEBUG)
+  set(DIRECTORIES
+      "$<$<CONFIG:Debug>:${Eigen3_INCLUDE_DIRS_DEBUG}>" "$<$<CONFIG:Release>:${Eigen3_INCLUDE_DIRS_DEBUG}>"
+      "$<$<CONFIG:RelWithDebInfo>:${Eigen3_INCLUDE_DIRS_DEBUG}>" "$<$<CONFIG:MinSizeRel>:${Eigen3_INCLUDE_DIRS_DEBUG}>")
+else()
+  set(DIRECTORIES
+      "$<$<CONFIG:Debug>:${Eigen3_INCLUDE_DIRS_RELEASE}>" "$<$<CONFIG:Release>:${Eigen3_INCLUDE_DIRS_RELEASE}>"
+      "$<$<CONFIG:RelWithDebInfo>:${Eigen3_INCLUDE_DIRS_RELEASE}>"
+      "$<$<CONFIG:MinSizeRel>:${Eigen3_INCLUDE_DIRS_RELEASE}>")
+endif()
+set_property(TARGET Eigen3::Eigen3 PROPERTY INTERFACE_INCLUDE_DIRECTORIES ${DIRECTORIES})
+link_libraries(Eigen3::Eigen3)
+
+# Add general compiler flags
+set(CMAKE_MACOSX_RPATH 1)
+
+# Test Coverage
+option(USE_COVERAGE "GCOV code coverage analysis" OFF)
+
+if(USE_COVERAGE AND (CMAKE_COMPILER_IS_GNUC OR CMAKE_COMPILER_IS_GNUCXX))
+  message(STATUS "USE_COVERAGE : ${USE_COVERAGE}")
+  set(GCOV_CFLAGS "-fprofile-arcs -ftest-coverage -O0 -fno-default-inline -fno-inline")
+  set(GCOV_LDFLAGS "-fprofile-arcs -ftest-coverage -O0 -fno-default-inline -fno-inline")
+
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${GCOV_CFLAGS}")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${GCOV_CFLAGS}")
+  set(CMAKE_LD_FLAGS "${CMAKE_LD_FLAGS} ${GCOV_LDFLAGS}")
+
+  message(STATUS "CMAKE_C_FLAGS : ${CMAKE_C_FLAGS}")
+  message(STATUS "CMAKE_CXX_FLAGS : ${CMAKE_CXX_FLAGS}")
+  message(STATUS "CMAKE_LD_FLAGS : ${CMAKE_LD_FLAGS}")
+endif()
+
+option(BSK_STRICT_WARNINGS "Enable additional compiler warnings for Basilisk sources" ON)
+
+# Add platform specific compiler flags
+if(MSVC)
+  set(CMAKE_CXX_STANDARD 17)
+  add_definitions(/MP)
+  add_definitions(/D NOMINMAX)
+  add_definitions(/D _USE_MATH_DEFINES)
+  add_definitions(/D _CRT_SECURE_NO_WARNINGS)
+  add_definitions(/D _WINSOCK_DEPRECATED_NO_WARNINGS)
+  add_definitions(/D _WIN32_WINNT=0x0501) # Targets Windows xp
+  if(NOT BSK_STRICT_WARNINGS)
+    add_definitions(/W3)
+  endif()
+  add_definitions(/wd"4913")
+  add_definitions(/wd"4251")
+  add_definitions(/wd"5208")
+  add_definitions(/wd"4267")
+  add_definitions(/bigobj)
+  # Make sure we are using Multi-Threaded run time library
+  foreach(flag CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG
+               CMAKE_CXX_FLAGS_RELEASE)
+    if (${CMAKE_BUILD_TYPE} STREQUAL "Debug")
+      string(REPLACE "/D_DEBUG" "" "${flag}" "${${flag}}")
+      string(REPLACE "/MDd" "${CONAN_LINK_RUNTIME_MULTI}" "${flag}" "${${flag}}")
+      string(REPLACE "/MTd" "${CONAN_LINK_RUNTIME_MULTI}" "${flag}" "${${flag}}")
+    else()
+      string(REPLACE "/MD" "${CONAN_LINK_RUNTIME_MULTI}" "${flag}" "${${flag}}")
+      string(REPLACE "/MT" "${CONAN_LINK_RUNTIME_MULTI}" "${flag}" "${${flag}}")
+    endif()
+    # C module calls can raise BasiliskError through the C++ logger. Remove
+    # CMake's default /EHc assumption that extern "C" functions never throw.
+    string(REPLACE "/EHsc" "/EHs" "${flag}" "${${flag}}")
+    set("${flag}" "${${flag}} /EHs")
+  endforeach()
+elseif(APPLE)
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -gdwarf-3")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -gdwarf-3 -stdlib=libc++")
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -gdwarf-3")
+  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}  -Wall")
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}  -Wall")
+  # Multiple static Conan dependencies can legitimately pull in the same archive
+  # (for example zlib through cfitsio, OpenCV, and protobuf). Apple ld warns even
+  # though it safely ignores the duplicate archive, so suppress that linker noise
+  # only on AppleClang toolchains new enough to recognize this linker option.
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"
+     AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15.0)
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-no_warn_duplicate_libraries")
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,-no_warn_duplicate_libraries")
+  endif()
+  if(${CMAKE_GENERATOR} MATCHES "Xcode")
+    set(CMAKE_XCODE_GENERATE_SCHEME YES)
+  endif()
+else()
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -gdwarf-3")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -gdwarf-3 -fPIC")
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -gdwarf-3")
+  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}  -Wall")
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}  -Wall")
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-register")
+endif()
+
+# Keep strict diagnostics focused on source maintained by Basilisk. Generated
+# wrappers, imported source, and external modules are excluded from the strict
+# warning baseline.
+function(bsk_suppress_strict_warnings_for_sources)
+  if(NOT BSK_STRICT_WARNINGS)
+    return()
+  endif()
+
+  if(MSVC)
+    set(SUPPRESS_WARNING_OPTION /w)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
+    set(SUPPRESS_WARNING_OPTION -w)
+  else()
+    return()
+  endif()
+
+  foreach(SOURCE_FILE IN LISTS ARGN)
+    set_property(SOURCE "${SOURCE_FILE}" APPEND PROPERTY COMPILE_OPTIONS "${SUPPRESS_WARNING_OPTION}")
+  endforeach()
+endfunction()
+
+set(BSK_THIRD_PARTY_SOURCE_FILES
+  "${CMAKE_SOURCE_DIR}/simulation/environment/magneticFieldWMM/GeomagnetismLibrary.c"
+  "${CMAKE_SOURCE_DIR}/simulation/environment/MsisAtmosphere/nrlmsise-00.c"
+  "${CMAKE_SOURCE_DIR}/simulation/environment/MsisAtmosphere/nrlmsise-00_data.c")
+
+if(BSK_STRICT_WARNINGS)
+  message(STATUS "Basilisk strict compiler warnings are enabled")
+
+  if(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
+    foreach(language C CXX)
+      add_compile_options(
+        $<$<COMPILE_LANGUAGE:${language}>:-Wall>
+        $<$<COMPILE_LANGUAGE:${language}>:-Wextra>
+        $<$<COMPILE_LANGUAGE:${language}>:-Wpedantic>
+        $<$<COMPILE_LANGUAGE:${language}>:-Wconversion>
+        $<$<COMPILE_LANGUAGE:${language}>:-Wsign-conversion>
+        $<$<COMPILE_LANGUAGE:${language}>:-Wdouble-promotion>
+        $<$<COMPILE_LANGUAGE:${language}>:-Wformat=2>
+        $<$<COMPILE_LANGUAGE:${language}>:-Wundef>
+        $<$<COMPILE_LANGUAGE:${language}>:-Wimplicit-fallthrough>
+        $<$<COMPILE_LANGUAGE:${language}>:-Wunused-parameter>)
+    endforeach()
+
+    add_compile_options(
+      $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>
+      $<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>)
+
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      add_compile_options(
+        $<$<COMPILE_LANGUAGE:C>:-Wshadow>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wshadow=compatible-local>)
+    else()
+      # Clang does not provide a general local-only shadow diagnostic. This
+      # narrower group catches lambda-related local shadowing without warning
+      # on the common `this->member = member` setter pattern.
+      add_compile_options(
+        $<$<COMPILE_LANGUAGE:C>:-Wshadow>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wshadow-uncaptured-local>)
+    endif()
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang")
+      add_compile_options(
+        $<$<COMPILE_LANGUAGE:C>:-Wshorten-64-to-32>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wshorten-64-to-32>)
+    endif()
+  elseif(MSVC)
+    include(cmake/bskMsvcWarnings.cmake)
+    bsk_remove_msvc_default_warning_levels()
+    add_compile_options(/w14267 /wd4100 /wd4458)
+  endif()
+endif()
+
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  set(_arch_suffix 64)
+else()
+  set(_arch_suffix 32)
+endif()
+
+# TODO: Move the cspice library extension into a custom pyswice CMakeList.txt Manually create list of libraries
+# depending on system
+find_package(cspice REQUIRED QUIET CONFIG)
+set(library_dependencies cspice::cspice)
+if(WIN32)
+  set(CMAKE_MSVCIDE_RUN_PATH "${CMAKE_BINARY_DIR}/Basilisk")
+  set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS YES)
+  # fix for opencv not finding conan gflags for opencv sfm lib on windows when the finding is fixed, the following line
+  # should be removed https://github.com/conan-community/community/issues/210
+  list(REMOVE_ITEM CONAN_LIBS opencv_sfm411d multiview)
+
+elseif(APPLE)
+  set(CMAKE_SKIP_BUILD_RPATH FALSE) # use, i.e. don't skip the full RPATH for the build tree
+  set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE) # when building, don't use the install RPATH already (but later on when
+                                           # installing)
+  set(CMAKE_INSTALL_RPATH "${CMAKE_BINARY_DIR}/Basilisk"  # the RPATH to be used when installing
+      # Also add relative paths so we can install from wheel/sdist.
+      # TODO: Is there a proper way to set relative library paths without just
+      # guessing how many parent ".." directories to use?
+      "@loader_path"
+      "@loader_path/.."
+      "@loader_path/../.."
+  )
+
+  # don't add the automatically determined parts of the RPATH which point to directories outside the build tree to the
+  # install RPATH
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+else()
+  set(CMAKE_SKIP_BUILD_RPATH FALSE)
+  set(CMAKE_INSTALL_RPATH "\$ORIGIN/../../")
+endif()
+
+set_property(GLOBAL PROPERTY BUILT_LIB_LIST "ArchitectureUtilities")
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+
+# Targets that must be built first
+add_subdirectory("architecture/utilities")
+add_subdirectory("utilities") # has protobuffers included
+add_subdirectory("architecture/messaging/cMsgCInterface")
+add_subdirectory("architecture/messaging/")
+
+# TODO: I'd call this generate_libraries(), because it really does find all of them. TODO: I'd like for all generated
+# libraries to end up in a dist/Basilisk/lib folder rather than the /dist/Basilisk folder; however haven't found a way
+# to use target_link_libraries() in a cross platform way to support this (needs full path and custom extensions
+# --.dylib, .lib, .a, etc -- which gets messy in CMake).
+set(AllLibs "")
+generate_package_libraries("${CMAKE_SOURCE_DIR}" "${AllLibs}") # This finds GeneralModuleFiles and generates a library
+                                                               # of the parentDirectory name
+bsk_assert_architecture_link_ownership("${AllLibs}")
+
+set(ARCHITECTURE_LIBS architectureLib ModuleIdGenerator)
+
+# ARCHITECTURE
+find_package_targets("${CMAKE_SOURCE_DIR}/architecture" ARCHITECTURE_TARGETS)
+generate_package_targets("${ARCHITECTURE_TARGETS}" "${ARCHITECTURE_LIBS};" "architecture")
+
+# Rust modules (experimental, opt-in via BUILD_RUST_MODULES -- see
+# bskTargetExcludeBuildOptions.cmake). Discovery is coarser than the C/C++
+# calls above/below -- one call per top-level module root rather than one per
+# sub-package -- since there are no Rust modules under this root yet to
+# motivate splitting LIB_DEP_LIST any finer; a future module needing more
+# than ARCHITECTURE_LIBS can get its own call added the same way e.g.
+# DYN_TARGETS does below.
+find_rust_package_targets("${CMAKE_SOURCE_DIR}/architecture" ARCHITECTURE_RUST_TARGETS)
+generate_rust_package_targets("${ARCHITECTURE_RUST_TARGETS}" "${ARCHITECTURE_LIBS};" "architecture")
+
+# SIMULATION
+# TODO: Move the following commands into a seperate CMakeList.txt s.t. this file is just configuration (problem:
+# currently when I do this the targets argument in generate_package_targets gets interpreted differently) TODO: Automate
+# this: 1) Look for package directories (dynamics, environment), 2) Find/Link any libraries associated with that package
+# (dynamicsLib), 3) Look for custom CMakeLists.txt to link additional libraries.
+
+# Finds relative path of all .i files within the directory
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/dynamics" DYN_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/mujocoDynamics" MULTI_BODY_DYN_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/environment" ENV_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/forceTorque" FORCE_TORQUE_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/onboardDataHandling" DATA_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/deviceInterface" DEVICE_INTERFACE_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/power" POWER_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/navigation" NAV_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/sensors" SENSORS_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/simSynch" SIM_SYNCH_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/vizard" VIZ_INTERFACE_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/thermal" THERMAL_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/simulation/communication" COMMUNICATION_TARGETS)
+
+if(NOT "${EXTERNAL_MODULES_PATH}" STREQUAL "")
+  string(REPLACE "\\" "/" EXTERNAL_MODULES_PATH "${EXTERNAL_MODULES_PATH}")
+  include_directories("${EXTERNAL_MODULES_PATH}")
+  find_package_targets("${EXTERNAL_MODULES_PATH}" EXTERNAL_MODULE_TARGETS)
+  find_external_rust_package_targets(
+    "${EXTERNAL_MODULES_PATH}" EXTERNAL_RUST_MODULE_TARGETS)
+  if(EXISTS "${EXTERNAL_MODULES_PATH}/ExternalModules/_GeneralModuleFiles")
+    generate_package_libraries("${EXTERNAL_MODULES_PATH}" "${AllLibs}")
+  endif()
+  generate_package_targets("${EXTERNAL_MODULE_TARGETS}" "${AllLibs}" "ExternalModules")
+  generate_rust_package_targets(
+    "${EXTERNAL_RUST_MODULE_TARGETS}" "${AllLibs}" "ExternalModules")
+endif(NOT "${EXTERNAL_MODULES_PATH}" STREQUAL "")
+
+# The quotations around DYN_TARGETS informs function that it is a list
+generate_package_targets("${DYN_TARGETS}" "dynamicsLib;ModuleIdGenerator" "simulation")
+# Only build mujocoDynamics targets if the mujocoDynamics library is available
+if(NOT ("mujocoDynamics" IN_LIST EXCLUDED_BSK_LIBRARIES))
+  generate_package_targets("${MULTI_BODY_DYN_TARGETS}" "mujocoDynamicsLib;ModuleIdGenerator" "simulation")
+endif()
+generate_package_targets("${ENV_TARGETS}" "environmentLib;ModuleIdGenerator;${library_dependencies}" "simulation")
+generate_package_targets("${FORCE_TORQUE_TARGETS}" "${ARCHITECTURE_LIBS};${library_dependencies}" "simulation")
+generate_package_targets("${DATA_TARGETS}" "onboardDataHandlingLib;ModuleIdGenerator" "simulation")
+generate_package_targets("${DEVICE_INTERFACE_TARGETS}" "${ARCHITECTURE_LIBS};" "simulation")
+generate_package_targets("${POWER_TARGETS}" "powerLib;ModuleIdGenerator" "simulation")
+generate_package_targets("${NAV_TARGETS}" "${ARCHITECTURE_LIBS};" "simulation")
+generate_package_targets("${SENSORS_TARGETS}" "${ARCHITECTURE_LIBS};" "simulation")
+generate_package_targets("${SIM_SYNCH_TARGETS}" "${ARCHITECTURE_LIBS};" "simulation")
+generate_package_targets("${VIZ_INTERFACE_TARGETS}" "${ARCHITECTURE_LIBS};" "simulation")
+generate_package_targets("${THERMAL_TARGETS}" "${ARCHITECTURE_LIBS};" "simulation")
+generate_package_targets("${COMMUNICATION_TARGETS}" "${ARCHITECTURE_LIBS};" "simulation")
+
+# Rust modules under simulation/ -- see the "ARCHITECTURE" section above for
+# why this is one coarse call instead of mirroring every DYN_TARGETS-style
+# sub-package split.
+find_rust_package_targets("${CMAKE_SOURCE_DIR}/simulation" SIMULATION_RUST_TARGETS)
+generate_rust_package_targets("${SIMULATION_RUST_TARGETS}" "${ARCHITECTURE_LIBS};" "simulation")
+
+# FSW ALGORITHMS
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/attControl" ATT_CONTROL_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/attDetermination" ATT_DET_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/attGuidance" ATT_GUID_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/dvGuidance" DV_GUID_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/effectorInterfaces" EFF_INTERFACES_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/formationFlying" FORM_FLYING_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/fswUtilities" FSW_UTIL_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/imageProcessing" IMAGE_PROC_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/opticalNavigation" OPT_NAV_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/rwConfigData" RW_CONFIG_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/sensorInterfaces" SENSOR_INTERFACE_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/smallBodyNavigation" SMALLBODY_NAV_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/stateEstimation" STATE_EST_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/orbitControl" ORBIT_CONTROL_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/transDetermination" TRANS_DET_TARGETS)
+find_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms/vehicleConfigData" VEH_CONFIG_TARGETS)
+
+generate_package_targets("${ATT_CONTROL_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${ATT_DET_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${ATT_GUID_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${DV_GUID_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${EFF_INTERFACES_TARGETS}" "effectorInterfacesLib;ModuleIdGenerator" "fswAlgorithms")
+generate_package_targets("${FORM_FLYING_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${FSW_UTIL_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${IMAGE_PROC_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${OPT_NAV_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${RW_CONFIG_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${SENSOR_INTERFACE_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${SMALLBODY_NAV_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${STATE_EST_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${ORBIT_CONTROL_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+generate_package_targets("${TRANS_DET_TARGETS}" "transDeterminationLib;ModuleIdGenerator" "fswAlgorithms")
+generate_package_targets("${VEH_CONFIG_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+
+bsk_finalize_fsw_bindings()
+bsk_finalize_simulation_bindings()
+
+# Rust modules under fswAlgorithms/ -- see the "ARCHITECTURE" section above.
+find_rust_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms" FSW_RUST_TARGETS)
+generate_rust_package_targets("${FSW_RUST_TARGETS}" "${ARCHITECTURE_LIBS};" "fswAlgorithms")
+
+# TEMPLATE MODULES
+find_package_targets("${CMAKE_SOURCE_DIR}/moduleTemplates" TEMPLATE_MODULES_TARGETS)
+
+generate_package_targets("${TEMPLATE_MODULES_TARGETS}" "${ARCHITECTURE_LIBS};" "moduleTemplates")
+
+find_rust_package_targets("${CMAKE_SOURCE_DIR}/moduleTemplates" TEMPLATE_MODULES_RUST_TARGETS)
+generate_rust_package_targets("${TEMPLATE_MODULES_RUST_TARGETS}" "${ARCHITECTURE_LIBS};" "moduleTemplates")
+
+# MESSAGES
+add_message_headers()
+
+# Pyswice
+find_package_targets("${CMAKE_SOURCE_DIR}/topLevelModules/pyswice" PYSWICE_TARGETS) # Finds relative path of all .i
+                                                                                    # files within the directory
+generate_package_targets("${PYSWICE_TARGETS}" "${ARCHITECTURE_LIBS};${library_dependencies}" "topLevelModules")
+
+# PYTHON PACKAGE CONFIGURATION
+# Must make the build directories first, so that cmake can insert empty init files before build (needed for packaging correctly)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk/architecture")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk/simulation")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk/fswAlgorithms")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk/moduleTemplates")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk/topLevelModules")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk/ExternalModules")
+
+bsk_generate_build_info("${CMAKE_BINARY_DIR}/Basilisk")
+
+if(WIN32)
+  file(WRITE "${CMAKE_BINARY_DIR}/Basilisk/__init__.py"
+       "#init file written by the build\n" "import sys, os\n" "from Basilisk import __path__\n"
+       "bskPath = __path__[0]\n" "os.add_dll_directory(bskPath)\n"
+       "from Basilisk._buildInfo import getBuildInfo, hasBuildFeature, printBuildInfo\n"
+       "from Basilisk.architecture import messaging\n"
+       "try:\n"
+       "    from importlib.metadata import version as _pkg_version\n"
+       "    __version__ = _pkg_version('bsk')\n"
+       "except Exception:\n"
+       "    __version__ = '0.0.0'\n")
+else()
+  file(WRITE "${CMAKE_BINARY_DIR}/Basilisk/__init__.py"
+      "from Basilisk._buildInfo import getBuildInfo, hasBuildFeature, printBuildInfo\n"
+      "from Basilisk.architecture import messaging # ensure recorders() work without first importing messaging\n"
+      "try:\n"
+      "    from importlib.metadata import version as _pkg_version\n"
+      "    __version__ = _pkg_version('bsk')\n"
+      "except Exception:\n"
+      "    __version__ = '0.0.0'\n")
+endif()
+
+# TODO: Iterate through all dist directories and add __init__.py's where they don't exist
+file(
+  GLOB_RECURSE DIST_DIRECTORIES
+  LIST_DIRECTORIES true
+  "${CMAKE_BINARY_DIR}/Basilisk/*")
+
+foreach(DIR ${DIST_DIRECTORIES})
+  # Messaging owns its initializer through a build-time generator. An empty
+  # configure-time placeholder would make that output appear up to date after
+  # cleaning and reconfiguring an existing build directory.
+  if(DIR STREQUAL "${CMAKE_BINARY_DIR}/Basilisk/architecture/messaging")
+    continue()
+  endif()
+  if(IS_DIRECTORY ${DIR} AND NOT IS_SYMLINK ${DIR})
+    file(
+      GLOB DIST_DIR_FILES
+      RELATIVE ${DIR}
+      "${DIR}/*.py")
+    if(DIST_DIR_FILES)
+      list(FIND DIST_DIR_FILES "__init__.py" INIT_FOUND)
+      if(${INIT_FOUND} EQUAL -1)
+        file(WRITE "${DIR}/__init__.py" "")
+      endif()
+    else()
+      file(WRITE "${DIR}/__init__.py" "")
+    endif()
+  endif()
+endforeach()
+
+# symlink utilities into the dist directory TODO: consider making the utilities directory it's own module with
+# associated .i file and many `%pythoncode` directives.
+file(GLOB pythonModules CONFIGURE_DEPENDS
+     "${CMAKE_SOURCE_DIR}/utilities/*.py" "${CMAKE_SOURCE_DIR}/utilities/**")
+create_symlinks("${CMAKE_BINARY_DIR}/Basilisk/utilities" ${pythonModules})
+
+find_python_package_targets("${CMAKE_SOURCE_DIR}/fswAlgorithms" FSW_PYTHON_TARGETS)
+generate_python_package_targets("${FSW_PYTHON_TARGETS}" "fswAlgorithms")
+
+find_python_package_targets("${CMAKE_SOURCE_DIR}/simulation" SIMULATION_PYTHON_TARGETS)
+generate_python_package_targets("${SIMULATION_PYTHON_TARGETS}" "simulation")
+
+# symlink into package the supportData files to keep
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk/supportData")
+file(GLOB dataFiles CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/../supportData/*")
+create_symlinks("${CMAKE_BINARY_DIR}/Basilisk/supportData" ${dataFiles})
+
+# Optional performance benchmark targets
+add_subdirectory("${CMAKE_SOURCE_DIR}/../benchmarks" "${CMAKE_BINARY_DIR}/benchmarks")
+
+# Native test targets
+if(BUILD_TESTING)
+  add_subdirectory("architecture/utilities/tests")
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/architecture/system_model/_UnitTest/CMakeLists.txt")
+    add_subdirectory("architecture/system_model/_UnitTest")
+  endif()
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fswAlgorithms/orbitControl/lambertSolver/_UnitTest/CMakeLists.txt")
+    add_subdirectory("fswAlgorithms/orbitControl/lambertSolver/_UnitTest")
+  endif()
+  add_subdirectory("simulation/dynamics/_GeneralModuleFiles/_UnitTestDynamics")
+  # Source archives omit _UnitTest directories.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/simulation/dynamics/Integrators/_UnitTest/CMakeLists.txt")
+    add_subdirectory("simulation/dynamics/Integrators/_UnitTest")
+  endif()
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/simulation/communication/linkBudget/_UnitTest/CMakeLists.txt")
+    add_subdirectory("simulation/communication/linkBudget/_UnitTest")
+  endif()
+endif()
+
+# Match the MSVC branch above; clang-cl uses Clang's warning options.
+if(MSVC AND BSK_STRICT_WARNINGS AND NOT CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
+  bsk_set_msvc_warning_levels("${CMAKE_CURRENT_SOURCE_DIR}")
+endif()

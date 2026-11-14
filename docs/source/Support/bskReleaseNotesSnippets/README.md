@@ -1,0 +1,116 @@
+Release Notes Snippets
+======================
+
+Purpose
+-------
+This file is the source of truth for release-note snippet requirements.
+
+Pull requests with user- or developer-facing changes should contribute release notes by
+adding a snippet file in this folder. Maintainers collect and edit the notes
+at release time and place them in the matching version-series file under
+``docs/source/Support/bskReleaseNotes/``.
+
+User- or developer-facing changes include public APIs, modules, examples,
+documentation, build/install behavior, packaging, validation semantics, performance,
+and bug fixes users may care about.
+
+A snippet is not required for internal-only refactors, test-only maintenance,
+formatting/lint-only changes, comment-only changes, generated-file cleanup, or small
+internal plumbing changes with no user/developer-facing behavior, API, documentation,
+build/install, packaging, performance, or validation impact.
+
+Known-issue entries have a narrower scope: they cover issues affecting tagged
+releases. An issue introduced and fixed entirely within a beta cycle needs no
+known-issue entry if no tagged release was affected. This exemption does not
+change the release-note requirements above; see
+``../bskKnownIssuesSnippets/README.md`` for the known-issue policy.
+
+What to add
+-----------
+1. Add a new .rst file in this folder when a release-note snippet is required.
+2. The filename can be anything meaningful (for example: 1255-tle-osculating.rst).
+3. Put one release-note item per line.
+4. Each line should be written exactly as it should appear in the release notes.
+5. Use valid RST markup when needed (for example, :ref:`moduleName` or inline links).
+
+How snippets are inserted
+-------------------------
+The active development section in the matching version-series page includes:
+
+``docs/source/Support/bskReleaseNotesSnippets/_compiled_latest.rst``
+
+Sphinx creates the compiled release notes before reading pages, using the shared
+compiler and Sphinx extension:
+
+``docs/source/_ext/rst_snippets.py``
+
+This runs for ``make html``, ``make.bat html``, direct Sphinx commands, and
+single-page previews. The same compiler independently compiles known-issue
+snippets from ``docs/source/Support/bskKnownIssuesSnippets``.
+
+To compile both collections without building documentation, run
+``make -C docs snippets``. Use ``make -C docs release-notes-snippets`` for only
+release notes, or ``make -C docs known-issues-snippets`` for only known issues.
+On Windows, run ``make.bat`` with the same target from ``docs``.
+The original ``_compile_release_notes_snippets.py`` command remains available
+and compiles only release notes.
+
+The generator reads snippet files in this folder, concatenates them in
+case-insensitive filename order with a blank line between files, and preserves
+internal indentation and blank lines. It writes the compiled output only when
+the content changes. Neither collection is archived or deleted during builds.
+The blank source lines between bullets do not add spacing to the rendered list.
+
+For example, development notes for ``2.13.0b0`` appear in
+``docs/source/Support/bskReleaseNotes/2.13.rst`` beneath ``Version |release|``.
+The relative include from a series page is
+``.. include:: ../bskReleaseNotesSnippets/_compiled_latest.rst``.
+Keep exactly one active release-note include in the documentation. Known issues
+have their own active include and release-time review; see the README in
+``../bskKnownIssuesSnippets``.
+
+Full documentation builds fail if either nonempty collection has no active
+include. Comments and code examples do not count as active includes. Empty
+collections need no include after finalization, and single-page previews are
+exempt from this check.
+
+At release time, maintainers replace the include with reviewed bullet content
+under a literal version and release date, then remove only the consumed
+snippets. A release such as ``2.12.1`` goes into ``2.12.rst``, above ``2.12.0``.
+The compiler does not choose a release or move notes between series pages.
+
+Before a tagged release, maintainers sort longer lists into topic subsections
+and edit or combine related entries as needed. Follow the topic order in the
+BSK Release Guide, put compatibility and migration changes first, and keep
+each entry in one category with its related examples and tests. Preserve
+migration instructions, references, issue numbers, and beta markers. Small
+patch releases can remain simple lists. PR snippets remain individual bullet
+entries; the compiler does not assign topics.
+
+When starting a new development cycle, reuse the series page for a patch or
+create the next series page and add it at the top of the
+``docs/source/Support/bskReleaseNotes.rst`` index. Place the active include and
+the ``bsk-release-current`` label in the new development section. There is no
+separate upcoming-release page. See the BSK Release Guide for the complete
+finalization and next-beta procedures.
+
+Formatting guidance
+-------------------
+- Keep each line concise and user-facing.
+- Start lines with "- " so they are valid bullet items when merged.
+- If a PR adds multiple features/fixes, add multiple lines in the same snippet file.
+- If a PR adds three modules, add three separate lines.
+- Files named ``README.md`` are ignored.
+- Files starting with ``_`` are ignored (reserved for templates/examples/generated files).
+- The generated file ``_compiled_latest.rst`` is overwritten by the generator.
+
+Committing to the branch
+------------------------
+Be sure to commit the release notes snippet(s) to your branch to ensure they are included in the combined release notes of the next released version.
+
+
+Example
+-------
+See:
+
+_sample_release_notes_snippet.rst

@@ -1,0 +1,118 @@
+# Read the LICENSE file into a template variable
+file(READ "${CMAKE_SOURCE_DIR}/../LICENSE" MSG_AUTOSOURCE_LICENSE)
+
+# Set the output directory for all generated messages
+set(CMSGCINTERFACE_DIR ${CMAKE_BINARY_DIR}/autoSource/cMsgCInterface)
+
+function(GenCMessages TARGET searchDir)
+    #--------------------------------------------------------------------------
+    # Generates C++ definitions for each C message file named
+    # "{searchDir}/msgPayloadDefC/*Payload.h". Generated source files are
+    # appended to the TARGET.
+    #
+    # Implementation notes:
+    # This function was ported from `messaging/architecture/GenCMessages.py`.
+    # Originally, `GenCMessages.py` was called from the Conanfile prior to
+    # configuring CMake, but this meant that CMake could not track which
+    # C-messages changed, making incremental builds impossible.
+    # Instead, this function tracks dependencies directly in CMake.
+    #--------------------------------------------------------------------------
+
+    if("${searchDir}" STREQUAL "")
+        return()
+    endif()
+
+    # Find all C message payloads from the shared source inventory.
+    cmake_path(
+      ABSOLUTE_PATH
+      searchDir
+      BASE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+      NORMALIZE
+      OUTPUT_VARIABLE absoluteSearchDir)
+    bsk_filter_source_inventory(
+      payloadFiles
+      "${absoluteSearchDir}/msgPayloadDefC"
+      BSK_HEADER_FILES)
+    list(FILTER payloadFiles INCLUDE REGEX "Payload\\.h$")
+    foreach(payloadFile ${payloadFiles})
+
+        # Compute the name of the payload structure and generated files
+        get_filename_component(msgFileName "${payloadFile}" NAME_WLE)
+        string(REGEX REPLACE "^(.+)Payload$" "\\1" structName "${msgFileName}")
+        set(headerFile ${CMSGCINTERFACE_DIR}/${structName}_C.h)
+        set(objectFile ${CMSGCINTERFACE_DIR}/${structName}_C.cpp)
+        file(RELATIVE_PATH relativePayloadFile ${CMSGCINTERFACE_DIR} ${payloadFile})
+
+        # Set the template variables
+        set(MSG_AUTOSOURCE_TYPE   ${structName})
+        set(MSG_AUTOSOURCE_HEADER ${relativePayloadFile})
+
+        # Generate the corresponding .h header and .cpp object file
+        configure_file(msg_C.h.in   ${headerFile} @ONLY)
+        configure_file(msg_C.cpp.in ${objectFile} @ONLY)
+
+        # configure_file owns these outputs. Marking them GENERATED without a
+        # build-time rule creates invalid cross-configuration dependencies in
+        # Ninja Multi-Config and lets native clean remove required sources.
+        set(generatedFiles ${objectFile} ${headerFile})
+
+        # Add these files as sources for the TARGET
+        target_sources(${TARGET} PRIVATE ${generatedFiles})
+        set_property(TARGET ${TARGET} APPEND PROPERTY
+                     BSK_C_MESSAGE_INTERFACE_FILES ${generatedFiles})
+    endforeach()
+endfunction(GenCMessages)
+
+# Set the library name (ex. dynamicsLib, environmentLib, etc)
+set(LIB_NAME "cMsgCInterface")
+
+# Add Target
+add_library(${LIB_NAME} STATIC ${BSK_FWK_FILES})
+if(NOT WIN32)
+	target_compile_options(${LIB_NAME} PUBLIC "-fPIC")
+endif()
+
+# Generate and add C message source files to the library
+GenCMessages(${LIB_NAME} "../..")
+GenCMessages(${LIB_NAME} "${EXTERNAL_MODULES_PATH}")
+
+# Retire interfaces before any build-time consumer (in particular Rust's
+# bindgen scan) can read them. Python wrapper cleanup runs later and does not
+# order Cargo, so it cannot own this cleanup. Inspect the generated directory
+# as well as the current target to repair build trees from earlier betas that
+# did not retain a separate C-interface manifest.
+get_target_property(currentInterfaces ${LIB_NAME} BSK_C_MESSAGE_INTERFACE_FILES)
+file(GLOB previousInterfaces
+     "${CMSGCINTERFACE_DIR}/*_C.h" "${CMSGCINTERFACE_DIR}/*_C.cpp")
+foreach(previousInterface IN LISTS previousInterfaces)
+    if(NOT previousInterface IN_LIST currentInterfaces)
+        file(STRINGS "${previousInterface}" generatedMarker LIMIT_COUNT 1
+             REGEX "(Header|Implementation) generated automatically through CMake[.]")
+        if(generatedMarker)
+            file(REMOVE "${previousInterface}")
+        endif()
+    endif()
+endforeach()
+
+# Link all necessary libraries
+#target_link_libraries(${LIB_NAME} ArchitectureUtilities)
+target_link_libraries(${LIB_NAME} ${PYTHON3_MODULE})
+#target_link_libraries(${LIB_NAME} Eigen3::Eigen3)
+
+# define build location, IDE generation specifications
+# Solution folders are logical names; Windows drive letters are invalid here.
+set_target_properties(${LIB_NAME} PROPERTIES FOLDER "architecture/messaging")
+set_target_properties(${LIB_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk")
+set_target_properties(${LIB_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Basilisk")
+set_target_properties(${LIB_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Basilisk")
+
+# Define the location for the executable part of the library (.dll) files (Windows Only)
+# https://cmake.org/cmake/help/v3.17/manual/cmake-buildsystem.7.html#output-artifacts for details
+set_target_properties(${LIB_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk")
+set_target_properties(${LIB_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Basilisk")
+set_target_properties(${LIB_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Basilisk")
+
+# Define the location of the import library file (.lib) needed for the .dll (Windows Only)
+set_target_properties(${LIB_NAME} PROPERTIES ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Basilisk")
+set_target_properties(${LIB_NAME} PROPERTIES ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Basilisk")
+set_target_properties(${LIB_NAME} PROPERTIES ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Basilisk")

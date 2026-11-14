@@ -1,0 +1,190 @@
+"""Synchronize generated sources and refresh shared navigation when it changes."""
+
+import filecmp
+import hashlib
+import shutil
+from pathlib import Path
+from urllib.parse import quote
+
+
+def refresh_navigation_pages(app, env):
+    """Rewrite HTML pages when the shared navigation tree changes.
+
+    Sphinx normally rebuilds changed documents and their toctree ancestors,
+    but an unchanged sibling also embeds the global sidebar. Compare the
+    resolved local navigation trees, including titles and explicit link labels,
+    to catch changes without forcing source parsing or Doxygen regeneration.
+    The fingerprint is persisted with the Sphinx environment.
+    """
+    if app.builder.format != "html":
+        return []
+    digest = hashlib.sha256()
+    for docname, toc in sorted(env.tocs.items()):
+        digest.update(docname.encode("utf8"))
+        digest.update(b"\0")
+        digest.update(toc.pformat().encode("utf8"))
+        digest.update(b"\0")
+    fingerprint = digest.hexdigest()
+    previous = getattr(env, "bsk_navigation_fingerprint", None)
+    env.bsk_navigation_fingerprint = fingerprint
+    return sorted(env.found_docs) if previous != fingerprint else []
+
+
+def add_page_navigation(app, pagename, templatename, context, doctree):
+    """Add a collapsible local contents list to long, authored HTML guides.
+
+    Keep module/API, example, and version-series pages out of this contents list.
+    Use resolved section IDs, not guessed anchors or headings copied by hand.
+    """
+    if doctree is None or pagename.startswith((
+        "Documentation/", "examples/", "Support/bskReleaseNotes/",
+        "Support/bskKnownIssues/",
+    )):
+        return
+    from docutils import nodes
+
+    entries = []
+    for section in doctree.findall(nodes.section):
+        depth = 1
+        parent = section.parent
+        while parent is not None:
+            if isinstance(parent, nodes.section):
+                depth += 1
+            parent = parent.parent
+        if depth not in (2, 3) or not section.get("ids"):
+            continue
+        title = next((child for child in section if isinstance(child, nodes.title)), None)
+        if title is not None:
+            entries.append({
+                "title": title.astext(),
+                "href": "#" + quote(section["ids"][0], safe=""),
+                "nested": depth == 3,
+            })
+    if sum(not entry["nested"] for entry in entries) < 4:
+        return
+    body = context.get("body", "")
+    if "</h1>" not in body:
+        return
+    navigation = app.builder.templates.render("on-this-page.html", {"entries": entries})
+    context["body"] = body.replace("</h1>", "</h1>" + navigation, 1)
+
+
+def setup(app):
+    """Register incremental HTML navigation invalidation."""
+    app.connect("env-updated", refresh_navigation_pages)
+    app.connect("html-page-context", add_page_navigation)
+    return {"version": "1", "parallel_read_safe": True, "parallel_write_safe": True}
+
+
+def _tree_entries(root):
+    """Return the regular files and directories beneath ``root``."""
+    files = set()
+    directories = set()
+
+    for entry in root.rglob("*"):
+        relative_path = entry.relative_to(root)
+        if entry.is_symlink():
+            raise ValueError(
+                f"Generated documentation must not contain symlinks: {entry}"
+            )
+        if entry.is_dir():
+            directories.add(relative_path)
+        elif entry.is_file():
+            files.add(relative_path)
+
+    return files, directories
+
+
+def sync_generated_tree(staged_directory, destination_directory, remove_stale=True):
+    """Synchronize a staged generated tree into its live location.
+
+    Files whose contents have not changed are left untouched so that Sphinx can
+    use their modification times for incremental builds. By default, files and
+    directories that are absent from the staged tree are removed from the
+    destination.
+
+    :param staged_directory: Complete newly generated documentation tree.
+    :param destination_directory: Live documentation tree to update.
+    :param remove_stale: Whether to remove entries absent from the staged tree.
+    :return: Counts of added, updated, unchanged, and removed files.
+    """
+    staged_path = Path(staged_directory)
+    destination_path = Path(destination_directory)
+
+    if staged_path.is_symlink():
+        raise ValueError(
+            f"Staged documentation directory must not be a symlink: {staged_path}"
+        )
+    if not staged_path.is_dir():
+        raise ValueError(
+            f"Staged documentation directory does not exist: {staged_path}"
+        )
+    if destination_path.is_symlink():
+        raise ValueError(
+            f"Documentation destination must not be a symlink: {destination_path}"
+        )
+
+    staged_root = staged_path.resolve()
+    destination_root = destination_path.resolve()
+    if (
+        staged_root == destination_root
+        or staged_root in destination_root.parents
+        or destination_root in staged_root.parents
+    ):
+        raise ValueError("Staged and destination documentation trees must be separate")
+
+    staged_files, staged_directories = _tree_entries(staged_root)
+    destination_root.mkdir(parents=True, exist_ok=True)
+
+    removed_files = 0
+    destination_entries = sorted(
+        destination_root.rglob("*"),
+        key=lambda entry: len(entry.parts),
+        reverse=True,
+    )
+    for destination_entry in destination_entries:
+        relative_path = destination_entry.relative_to(destination_root)
+        if destination_entry.is_symlink():
+            destination_entry.unlink()
+            removed_files += 1
+        elif destination_entry.is_file() and (
+            relative_path in staged_directories
+            or (remove_stale and relative_path not in staged_files)
+        ):
+            destination_entry.unlink()
+            removed_files += 1
+        elif destination_entry.is_dir():
+            if relative_path in staged_files:
+                shutil.rmtree(destination_entry)
+            elif remove_stale and relative_path not in staged_directories:
+                destination_entry.rmdir()
+
+    for relative_path in sorted(staged_directories):
+        (destination_root / relative_path).mkdir(parents=True, exist_ok=True)
+
+    added_files = 0
+    updated_files = 0
+    unchanged_files = 0
+    for relative_path in sorted(staged_files):
+        staged_file = staged_root / relative_path
+        destination_file = destination_root / relative_path
+        destination_file.parent.mkdir(parents=True, exist_ok=True)
+
+        if destination_file.exists() and filecmp.cmp(
+            staged_file, destination_file, shallow=False
+        ):
+            unchanged_files += 1
+            continue
+
+        if destination_file.exists():
+            updated_files += 1
+        else:
+            added_files += 1
+        shutil.copyfile(staged_file, destination_file)
+
+    return {
+        "added": added_files,
+        "updated": updated_files,
+        "unchanged": unchanged_files,
+        "removed": removed_files,
+    }
