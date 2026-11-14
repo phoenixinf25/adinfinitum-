@@ -1,0 +1,24 @@
+{
+  "site": "Statio Shiv Shakti",
+  "latitude_deg": -69.373,
+  "longitude_deg": 32.319,
+  "touchdown_utc": "2023-08-23T12:33:00+00:00",
+  "touchdown_sun_elev_deg": 0.3783827356044113,
+  "predicted_sunset_utc": "2023-09-05T23:30:00+00:00",
+  "isro_pragyan_sleep_utc": "2023-09-02T14:30:00+00:00",
+  "isro_vikram_sleep_utc": "2023-09-04T02:30:00+00:00",
+  "predicted_next_sunrise_utc": "2023-09-23T05:30:00+00:00",
+  "lunar_night_hours": 414.0,
+  "earth_visibility": {
+    "always_visible": true,
+    "min_elevation_deg": 11.922486127093013,
+    "max_elevation_deg": 22.447593343513837,
+    "mean_elevation_deg": 17.523213658242973
+  },
+  "ai_optimization": {
+    "ridge_latitude_deg": -69.12,
+    "ridge_longitude_deg": 32.75,
+    "extra_sunlight_hours": 13.5,
+    "shorter_night_hours": 28.5
+  }
+}
