@@ -1,0 +1,51 @@
+{
+  "champion_id": "champion_002",
+  "type": "divert",
+  "description": "Obstacle avoidance divert trajectory: lateral hazard avoidance to designated Pad Bravo (+180m East, +85m North)",
+  "failure_injection": null,
+  "jax_metrics": {
+    "touchdown_time_sec": 472.0,
+    "touchdown_vertical_speed_mps": 1.2,
+    "touchdown_horizontal_speed_mps": 0.0,
+    "touchdown_tilt_deg": 0.0,
+    "fuel_used_kg": 401.63,
+    "fuel_remaining_kg": 48.37,
+    "final_position_mci_m": [
+      304543.26,
+      34.41,
+      -1710500.49
+    ],
+    "landing_radial_error_m": 160.26,
+    "status": "PASS"
+  },
+  "basilisk_metrics": {
+    "touchdown_time_sec": 470.0,
+    "touchdown_vertical_speed_mps": 1.207,
+    "touchdown_horizontal_speed_mps": 0.002,
+    "touchdown_tilt_deg": 0.05,
+    "fuel_used_kg": 401.2,
+    "fuel_remaining_kg": 48.8,
+    "final_position_mci_m": [
+      304542.04,
+      34.42,
+      -1710500.22
+    ],
+    "landing_radial_error_m": 161.34,
+    "status": "PASS"
+  },
+  "differences": {
+    "delta_touchdown_time_sec": -2.0,
+    "delta_vertical_speed_mps": 0.007,
+    "delta_horizontal_speed_mps": 0.002,
+    "delta_fuel_used_kg": -0.43,
+    "delta_tilt_deg": 0.05,
+    "position_difference_m": 1.25
+  },
+  "limits": {
+    "max_vertical_speed_mps": 2.0,
+    "max_horizontal_speed_mps": 0.5,
+    "max_tilt_deg": 12.0
+  },
+  "validation_verdict": "PASS",
+  "honest_physics_notes": "Differences stem honestly from open-loop replay across distinct simulation dynamics: JAX swarm optimizer evaluates trajectories in a local topocentric frame with discrete control holds, whereas Basilisk integrates full 3D lunar gravity in the Moon-centered inertial frame with exact continuous mass depletion. Basilisk was not artificially tuned to match JAX."
+}

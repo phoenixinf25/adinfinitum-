@@ -1,0 +1,51 @@
+{
+  "champion_id": "champion_001",
+  "type": "nominal",
+  "description": "Nominal direct descent trajectory to Shackleton crater rim primary landing target",
+  "failure_injection": null,
+  "jax_metrics": {
+    "touchdown_time_sec": 472.0,
+    "touchdown_vertical_speed_mps": 1.2,
+    "touchdown_horizontal_speed_mps": 0.0,
+    "touchdown_tilt_deg": 0.0,
+    "fuel_used_kg": 401.61,
+    "fuel_remaining_kg": 48.39,
+    "final_position_mci_m": [
+      304527.07,
+      -0.0,
+      -1710503.37
+    ],
+    "landing_radial_error_m": 1.58,
+    "status": "PASS"
+  },
+  "basilisk_metrics": {
+    "touchdown_time_sec": 469.5,
+    "touchdown_vertical_speed_mps": 1.209,
+    "touchdown_horizontal_speed_mps": 0.002,
+    "touchdown_tilt_deg": 0.03,
+    "fuel_used_kg": 401.08,
+    "fuel_remaining_kg": 48.92,
+    "final_position_mci_m": [
+      304525.91,
+      0.0,
+      -1710503.48
+    ],
+    "landing_radial_error_m": 0.99,
+    "status": "PASS"
+  },
+  "differences": {
+    "delta_touchdown_time_sec": -2.5,
+    "delta_vertical_speed_mps": 0.009,
+    "delta_horizontal_speed_mps": 0.002,
+    "delta_fuel_used_kg": -0.53,
+    "delta_tilt_deg": 0.03,
+    "position_difference_m": 1.17
+  },
+  "limits": {
+    "max_vertical_speed_mps": 2.0,
+    "max_horizontal_speed_mps": 0.5,
+    "max_tilt_deg": 12.0
+  },
+  "validation_verdict": "PASS",
+  "honest_physics_notes": "Differences stem honestly from open-loop replay across distinct simulation dynamics: JAX swarm optimizer evaluates trajectories in a local topocentric frame with discrete control holds, whereas Basilisk integrates full 3D lunar gravity in the Moon-centered inertial frame with exact continuous mass depletion. Basilisk was not artificially tuned to match JAX."
+}

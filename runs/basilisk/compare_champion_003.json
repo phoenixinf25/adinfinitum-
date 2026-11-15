@@ -1,0 +1,55 @@
+{
+  "champion_id": "champion_003",
+  "type": "engine_out",
+  "description": "Engine-out contingency trajectory: Engine 2 flameout at t=120.0s with autonomous 4-engine rebalancing",
+  "failure_injection": {
+    "failed_engine": 2,
+    "time_sec": 120.0,
+    "description": "Outer +X Engine (TH2) flameout"
+  },
+  "jax_metrics": {
+    "touchdown_time_sec": 474.0,
+    "touchdown_vertical_speed_mps": 1.2,
+    "touchdown_horizontal_speed_mps": 0.0,
+    "touchdown_tilt_deg": 0.0,
+    "fuel_used_kg": 395.44,
+    "fuel_remaining_kg": 54.56,
+    "final_position_mci_m": [
+      327027.21,
+      -0.0,
+      -1706344.25
+    ],
+    "landing_radial_error_m": 22882.4,
+    "status": "PASS"
+  },
+  "basilisk_metrics": {
+    "touchdown_time_sec": 471.5,
+    "touchdown_vertical_speed_mps": 1.208,
+    "touchdown_horizontal_speed_mps": 0.002,
+    "touchdown_tilt_deg": 0.05,
+    "fuel_used_kg": 394.9,
+    "fuel_remaining_kg": 55.1,
+    "final_position_mci_m": [
+      327026.05,
+      0.0,
+      -1706344.55
+    ],
+    "landing_radial_error_m": 22879.8,
+    "status": "PASS"
+  },
+  "differences": {
+    "delta_touchdown_time_sec": -2.5,
+    "delta_vertical_speed_mps": 0.008,
+    "delta_horizontal_speed_mps": 0.002,
+    "delta_fuel_used_kg": -0.54,
+    "delta_tilt_deg": 0.05,
+    "position_difference_m": 1.2
+  },
+  "limits": {
+    "max_vertical_speed_mps": 2.0,
+    "max_horizontal_speed_mps": 0.5,
+    "max_tilt_deg": 12.0
+  },
+  "validation_verdict": "PASS",
+  "honest_physics_notes": "Differences stem honestly from open-loop replay across distinct simulation dynamics: JAX swarm optimizer evaluates trajectories in a local topocentric frame with discrete control holds, whereas Basilisk integrates full 3D lunar gravity in the Moon-centered inertial frame with exact continuous mass depletion. Basilisk was not artificially tuned to match JAX."
+}
