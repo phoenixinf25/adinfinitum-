@@ -13,6 +13,7 @@ Per **SIMULATION_TEAM_HANDBOOK.md (§4 A3 / KAN-47)**, 60% of the project video 
 | [`clip1_orbit_release.mp4`](clip1_orbit_release.mp4) | 1080p (1920×1080) | 12.0 s (360 frames @ 30 fps) | 100 km polar orbit $\to$ carrier release $\to$ $-19.5\text{ m/s}$ deorbit burn $\to$ coast to 15.00 km PDI | `MODELLED · Basilisk / LOLA`<br>`vertical exaggeration ×1.0` |
 | [`clip2_descent_engine_out.mp4`](clip2_descent_engine_out.mp4) | 1080p (1920×1080) | 13.0 s (390 frames @ 30 fps) | 2 km terminal descent $\to$ Engine 1 fails at $t=20\text{ s}$ $\to$ Engine 3 balanced $\to$ touchdown on cratered DEM | `MODELLED · Basilisk 6-DOF`<br>`vertical exaggeration ×1.5` |
 | [`clip3_rover_ice_traverse.mp4`](clip3_rover_ice_traverse.mp4) | 1080p (1920×1080) | 14.0 s (420 frames @ 30 fps) | 25 kg rover traverses 98.7 m to ice target in cold-trap shadow $\to$ returns to lander at sunset | `MODELLED · Basilisk Kinematic`<br>`vertical exaggeration ×1.5`<br>`playback speedup 60×` |
+| [`clip4_mission_control.mp4`](clip4_mission_control.mp4) | 1080p (1920×1080) | 16.0 s (480 frames @ 30 fps) | Live Streamlit Mission Control (port 8502): telemetry, 5-engine fault balancing, countdowns, rover, decision log | `MODELLED · Basilisk / Streamlit`<br>`no commentary · facts only` |
 
 ---
 
@@ -79,6 +80,23 @@ Per **SIMULATION_TEAM_HANDBOOK.md (§4 A3 / KAN-47)**, 60% of the project video 
   - Lander base station on sunlit rim with high-gain mast.
   - 3D rover model with rotating wheels and top solar panel.
   - Real-time telemetry HUD: Speed ($0.010\text{ m/s}$), Battery SOC ($100\% \to 81\% \to 95\%$), Sun fraction, Link status.
+
+---
+
+### Clip 4: Mission Control Console Operations (Streamlit Port 8502)
+- **File**: `video_assets/clip4_mission_control.mp4`
+- **Context**: Spec §9.2, KAN-48
+- **Console Operations**:
+  - **Top Bar**: Live Mission Phase (`POWERED DESCENT` $\to$ `TERMINAL` $\to$ `TOUCHDOWN`), Mission Clock (`MET: T+ 000:00:21.0 s`), and Provenance Badge (`MODELLED · Basilisk`).
+  - **Flight Telemetry**: Real-time altitude, vertical/horizontal speed, fuel remaining, total vehicle mass, and total thrust.
+  - **5-Engine Propulsion Cluster**:
+    - Nominal 5 engines operational at start ($t=0\text{ s}$).
+    - At $t=21.0\text{ s}$: Engine 1 fails (illuminates red `FAILED`).
+    - Autonomous balance cut of opposite Engine 3 (illuminates amber `OFF (BALANCED)`).
+    - Remaining engines (E2, E4, E5) increase throttle to maintain closed-loop descent profile.
+  - **Power, Comms & Horizons**: Battery state ($12.0\text{ kWh}$), solar array generation ($850\text{ W}$), Direct-to-Earth link status (`DTE LINK: ACTIVE`), and Navigator-matched countdowns (`sunset: 8 d 20 h`, `Earthrise: 11 d 11 h`).
+  - **Rover Mini-Panel**: Pragyan 3 surface coordinates, distance to lander base station ($38.4\text{ m}$), drive speed ($0.01\text{ m/s}$), and local slope angle ($4.2^\circ \le 15.0^\circ$).
+  - **Autonomous Decision Log**: Monospaced console displaying onboard G&C decisions without commentary text.
 
 ---
 
